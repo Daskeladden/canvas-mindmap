@@ -10,9 +10,10 @@ This is a prototype.
 
 ## What it draws
 
-Each top-level branch has a colour its subtree inherits; a node's
-kind, from an org todo keyword or tag, a checkbox or a `:kind` option,
-outlines its box; a legend in the corner says which is which. The
+Each top-level branch has a colour that its subtree inherits. A node's
+kind, from a tag, a checkbox or a `:kind` option, outlines its box. A
+node's status, its org todo keyword, is a coloured badge before its
+label. A legend in the corner says which is which. The
 canvas is the size of its window and scrolls over the map with the
 arrows, the wheel or a drag. Hovering a box shows its note, clicking
 one opens a card with it, and with canvas-minimap running the minimap
@@ -64,10 +65,14 @@ quickest way to see whether the module built and the canvas is there.
 `M-x canvas-mindmap-show` draws the current buffer, and
 `M-x canvas-mindmap-show-file` another file. An org or markdown
 outline gives its headings, with plain list items under a heading as
-nodes too, nested by their indentation, and sub-headings after them. A
-todo keyword or the first tag of a heading is its kind, and so is a
-list item's checkbox; the other text under a heading is its note;
-links show their description; fenced code is skipped. Code is
+nodes too, nested by their indentation, and sub-headings after them.
+The first tag of a heading is its kind, and so is a list item's
+checkbox. A heading's todo keyword is its status. If org counts the
+keyword as done, the status is done too. The keywords and their split into open and done come from org
+in an org buffer, else from the file's `#+TODO:` lines, else from
+`org-todo-keywords`, else they are TODO and DONE. The other text under a
+heading is its note, links show their description, and fenced code is
+skipped. Code is
 outlined by tree-sitter when a grammar for its language is installed
 and the mode brought no parser of its own: the grammar's declarations,
 definitions, bodies and specifiers with a name, and its statements with
@@ -98,7 +103,10 @@ emacs -Q --batch -L /path/to/canvas-diagram -L /path/to/canvas-mindmap \
   --eval '(canvas-mindmap-export (quote ("Root" ("A" :kind "todo") ("B" :note "why"))) "map.png")'
 ```
 
-A spec is a nested list: `(LABEL [:kind KIND] [:note NOTE] [:icon ICON] CHILD...)`.
+A spec is a nested list: `(LABEL [:kind KIND] [:status KEYWORD [:done t]] [:note NOTE] [:icon ICON] CHILD...)`.
+`:status` gives the node its badge, and `:done t` marks the keyword as
+done. If `canvas-mindmap-statuses` does not list the keyword, `:done`
+sets the colour of its badge.
 
 ## Keys
 
@@ -112,6 +120,12 @@ branches, the buffer ends to the root and the last node, `goto-line`
 to a node by name; `RET` opens the card, `C-RET` visits the source,
 `SPC` opens the menu, `?` lists every key.
 
+`M-w` copies the node: its label, a blank line and its note. With a
+prefix argument, it copies the node's text in the org or markdown
+buffer: the heading line and the lines up to the next heading, or for a
+list item, its line and the lines indented below it. The menu's Copy
+group, `y`, and embark copy the header or the body alone.
+
 Folding works as in magit: `TAB` folds the selected node, hiding its
 children behind a count on its box, or unfolds it; `C-TAB` cycles it
 through folded, its children with their own folded, and everything
@@ -121,17 +135,20 @@ whole map. `c` and a double click on a box fold too, and going into a
 folded node with `f` unfolds it. Your folds survive re-reads of the
 source and changes of the level limit.
 
-The menu's own groups are the layout and the kinds. `d` sends the
+The menu's own groups are the layout, the kinds and the statuses. `d` sends the
 branches right, left or to both sides of the root, `e` draws the edges
 as curves, straight lines or elbows, `[` and `]` show fewer or more
 levels, folding everything below. The Kinds group is made when the
 menu opens: one entry per kind in the map, `K f` for functions say,
 each saying whether it shows and how many nodes it has; pressing one
 leaves that kind out of the map, or takes it back, while the menu stays
-up, so a code map can be pared down to its classes and methods, a
-VHDL map to its processes, or an org map to what is still to do; `K o`
-keeps only the next kind in turn and `K K` shows every kind again. A
-hidden node stays as the way to a shown one below it. The shared groups
+up, so a code map can be pared down to its classes and methods, or a
+VHDL map to its processes; `K o`
+keeps only the next kind in turn and `K K` shows every kind again. The
+Statuses group works the same way under `S`, with an entry for each
+todo keyword in the map: `S d` leaves out the DONE nodes, and `S S`
+shows every status again. A hidden node stays as the way to a shown one
+below it. The shared groups
 follow, zoom, boxes, spacing, font, palette, kinds, legend, icons and
 paper; the single keys work in the map directly as well.
 
@@ -143,6 +160,12 @@ shared spacing; `canvas-mindmap-depth` limits the levels;
 `canvas-mindmap-branch-colors` names the branch colours, or nil takes
 them from the palette in use. Font, colours, padding, box shape, kinds
 and icons are canvas-diagram's settings.
+
+`canvas-mindmap-statuses` gives each todo keyword the colour of its
+badge: TODO dark orange, NEXT steel blue, WAITING gold, DONE sea green
+and CANCELLED gray. If it does not list a keyword, the badge takes
+`canvas-mindmap-status-open-color`, or
+`canvas-mindmap-status-done-color` for a done keyword.
 
 ## Plugging in a language
 
@@ -161,7 +184,7 @@ package defines its own above them:
 ```
 
 The reader runs in the buffer and returns a nested spec, `(LABEL
-[:kind KIND] [:note NOTE] [:pos POS] CHILD...)`, or nil to let the next
+[:kind KIND] [:status KEYWORD [:done t]] [:note NOTE] [:pos POS] CHILD...)`, or nil to let the next
 source serve; `canvas-mindmap-pos-option` gives the `:pos` option only
 when the map asks for positions, which it does to follow a node to its
 place. A reader needs no parser of its own: `canvas-mindmap-treesit-tree`
@@ -178,6 +201,16 @@ processes by their sensitivity lists, notes ports with their mode and
 type, and hangs each state machine under the process that switches it.
 Colours for new kinds go in `canvas-diagram-extra-kinds`, icons in
 `canvas-diagram-extra-kind-icons`.
+
+A reader of a diagram inside a buffer, such as a mermaid mind map in
+a markdown fence, does not replace the buffer's outline. It calls
+`canvas-mindmap-follow` with a function of the buffer that returns the
+tree, and the map follows that instead. `canvas-mindmap-nest` builds
+the tree from nodes that each come with a level, an indent or a
+depth: a node hangs off the nearest node before it at a lower level.
+[canvas-mermaid](https://github.com/Daskeladden/canvas-mermaid) and
+[canvas-plantuml](https://github.com/Daskeladden/canvas-plantuml)
+draw their mind maps this way.
 
 ## Tests
 

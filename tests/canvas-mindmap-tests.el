@@ -113,6 +113,20 @@
   ;; THEN that is an error, not a silently dropped child
   (should-error (canvas-mindmap--tree '("Root" :colour "red" ("A")))))
 
+(ert-deftest canvas-mindmap-spec-options-become-status-and-done ()
+  ;; GIVEN a spec whose nodes carry :status, one of them :done too
+  ;; WHEN it is read, then a spec whose status is no string
+  ;; THEN each node has its status, only the done one is done, AND the
+  ;;      status that is no string is an error
+  (let* ((root (canvas-mindmap--tree '("Root" :status "TODO" ("A" :status "DONE" :done t) ("B"))))
+         (a (car (canvas-mindmap-node-children root))))
+    (should (equal (canvas-mindmap-node-status root) "TODO"))
+    (should-not (canvas-mindmap-node-done root))
+    (should (equal (canvas-mindmap-node-status a) "DONE"))
+    (should (canvas-mindmap-node-done a))
+    (should-not (canvas-mindmap-node-status (cadr (canvas-mindmap-node-children root)))))
+  (should-error (canvas-mindmap--tree '("Root" :status todo))))
+
 (ert-deftest canvas-mindmap-branches-are-numbered-from-the-root ()
   ;; GIVEN a tree with two top-level branches, one of them deeper
   ;; WHEN the tree is built
@@ -148,16 +162,48 @@
     (should (equal (canvas-mindmap--headings-tree)
                    '("Root" ("A" ("A1") ("A2")) ("B" :note "some body text"))))))
 
-(ert-deftest canvas-mindmap-org-keywords-tags-and-bodies-become-kinds-and-notes ()
-  ;; GIVEN headings with a todo keyword, a tag, and body text over two lines
+(ert-deftest canvas-mindmap-org-keywords-tags-and-bodies-become-statuses-kinds-and-notes ()
+  ;; GIVEN headings with a todo keyword and a tag, a done keyword, a tag
+  ;;       alone, and body text over two lines
   ;; WHEN they are read
-  ;; THEN the keyword is the kind, lower-cased, beating the tag,
-  ;;      a tag alone is the kind, AND the body, trimmed, is the note
+  ;; THEN the keyword is the status, done when org counts it done, the tag
+  ;;      the kind beside it, AND the body, trimmed, is the note
   (with-temp-buffer
     (insert "* TODO Ship it :risk:\nsome body\nmore\n\n** DONE Sub\n** Plain :idea:\n")
     (should (equal (canvas-mindmap--headings-tree)
-                   '("Ship it" :kind "todo" :note "some body\nmore"
-                     ("Sub" :kind "done") ("Plain" :kind "idea"))))))
+                   '("Ship it" :kind "risk" :status "TODO" :note "some body\nmore"
+                     ("Sub" :status "DONE" :done t) ("Plain" :kind "idea"))))))
+
+(defvar org-todo-keywords)
+
+(ert-deftest canvas-mindmap-todo-keywords-come-from-the-buffer-else-org ()
+  ;; GIVEN a buffer with #+TODO and #+SEQ_TODO lines, fast-access keys on
+  ;;       some keywords; then org's own sequences without a bar; then none
+  ;; WHEN its todo keywords are asked for, each time
+  ;; THEN those after a bar are done, the keys left off, AND with no bar
+  ;;      the last keyword is the done one, TODO and DONE when nothing says
+  (with-temp-buffer
+    (insert "#+TODO: TODO NEXT(n) | DONE(d!) COMPLETE\n#+seq_todo: WAIT HOLD | GAVEUP\n* NEXT a\n* COMPLETE b\n")
+    (should (equal (canvas-mindmap--todo-keywords)
+                   '(("TODO") ("NEXT") ("DONE" . t) ("COMPLETE" . t) ("WAIT") ("HOLD") ("GAVEUP" . t))))
+    (should (equal (canvas-mindmap--headings-tree "r")
+                   '("r" ("a" :status "NEXT") ("b" :status "COMPLETE" :done t)))))
+  (with-temp-buffer
+    (let ((org-todo-keywords '((sequence "A(a)" "B" "C") (type "X" "|" "Y"))))
+      (should (equal (canvas-mindmap--todo-keywords) '(("A") ("B") ("C" . t) ("X") ("Y" . t)))))
+    (let ((org-todo-keywords nil))
+      (should (equal (canvas-mindmap--todo-keywords) '(("TODO") ("DONE" . t)))))))
+
+(ert-deftest canvas-mindmap-todo-keywords-of-an-org-buffer-are-org-s ()
+  ;; GIVEN an org-mode buffer whose #+TODO line org has read
+  ;; WHEN its keywords and its headings are read
+  ;; THEN they are org's, split as org splits them
+  (with-temp-buffer
+    (insert "#+TODO: OPEN | SHUT\n* OPEN a\n* SHUT b\n")
+    (org-mode)
+    (should (equal (canvas-mindmap--todo-keywords) '(("OPEN") ("SHUT" . t))))
+    (should (equal (canvas-mindmap--headings-tree "r")
+                   '("r" ("a" :status "OPEN") ("b" :status "SHUT" :done t))))))
 
 (ert-deftest canvas-mindmap-plain-lists-become-nodes-under-their-heading ()
   ;; GIVEN a heading with an intro line, a nested plain list and a sub-heading
@@ -899,6 +945,105 @@
                (should (= (with-current-buffer org (point)) 13)))
            (canvas-diagram--release)))))))
 
+;;;; Copying a node
+
+(defconst canvas-mindmap-test--outline
+  (concat "* One\n\nBody line\n- item a\n  - item a1\n    more of a1\n- item b\n"
+          "** Two\nTwo's body\n#+begin_src sh\n* not a heading\n#+end_src\n* Three\n")
+  "An org outline to copy from: bodies, nested items, a code block holding a star line.")
+
+(defun canvas-mindmap-test--line-at (text)
+  "Where the first line holding TEXT starts in the current buffer."
+  (save-excursion
+    (goto-char (point-min))
+    (search-forward text)
+    (line-beginning-position)))
+
+(ert-deftest canvas-mindmap-source-text-of-an-org-heading ()
+  ;; GIVEN an org outline with bodies, nested items and a code block
+  ;; WHEN each part of its headings is asked for
+  ;; THEN the header is the heading's line, the body the lines up to the
+  ;;      next heading of any level, trimmed, a star line in a code block
+  ;;      being no heading, AND a heading without a body has none
+  (with-temp-buffer
+    (insert canvas-mindmap-test--outline)
+    (let ((one (canvas-mindmap-test--line-at "* One"))
+          (two (canvas-mindmap-test--line-at "** Two"))
+          (three (canvas-mindmap-test--line-at "* Three")))
+      (should (equal (canvas-mindmap--outline-text 'org one 'header) "* One"))
+      (should (equal (canvas-mindmap--outline-text 'org one 'body)
+                     "Body line\n- item a\n  - item a1\n    more of a1\n- item b"))
+      (should (equal (canvas-mindmap--outline-text 'org one 'all)
+                     "* One\n\nBody line\n- item a\n  - item a1\n    more of a1\n- item b"))
+      (should (equal (canvas-mindmap--outline-text 'org two 'body)
+                     "Two's body\n#+begin_src sh\n* not a heading\n#+end_src"))
+      (should-not (canvas-mindmap--outline-text 'org three 'body))
+      (should (equal (canvas-mindmap--outline-text 'org three 'all) "* Three")))))
+
+(ert-deftest canvas-mindmap-source-text-of-a-list-item ()
+  ;; GIVEN the same outline
+  ;; WHEN each part of its list items is asked for
+  ;; THEN the header is the item's line, the body the lines indented deeper
+  ;;      below it, AND an item with nothing below has no body
+  (with-temp-buffer
+    (insert canvas-mindmap-test--outline)
+    (let ((a (canvas-mindmap-test--line-at "- item a"))
+          (b (canvas-mindmap-test--line-at "- item b")))
+      (should (equal (canvas-mindmap--outline-text 'org a 'header) "- item a"))
+      (should (equal (canvas-mindmap--outline-text 'org a 'body) "  - item a1\n    more of a1"))
+      (should (equal (canvas-mindmap--outline-text 'org a 'all) "- item a\n  - item a1\n    more of a1"))
+      (should-not (canvas-mindmap--outline-text 'org b 'body)))))
+
+(ert-deftest canvas-mindmap-source-text-of-a-markdown-heading ()
+  ;; GIVEN a markdown outline whose first body has a fence holding a # line
+  ;; WHEN the first heading's body is asked for
+  ;; THEN it runs past the fence to the next real heading
+  (with-temp-buffer
+    (insert "# Root\n\nprose\n```\n# not a heading\n```\n## A\n")
+    (should (equal (canvas-mindmap--outline-text 'markdown 1 'body) "prose\n```\n# not a heading\n```"))))
+
+(ert-deftest canvas-mindmap-copies-a-node-and-its-org-source ()
+  ;; GIVEN a map that follows an org buffer
+  ;; WHEN a node with a body is copied, then from the source, then a leaf
+  ;;      without a note has its body copied
+  ;; THEN the node is its label and note, the source its heading and body,
+  ;;      AND the leaf's body is a user error, not the card's placeholder
+  (canvas-mindmap-test--rendering
+   (let ((kill-ring nil) (kill-ring-yank-pointer nil) (interprogram-cut-function nil))
+     (with-temp-buffer
+       (insert "* Root\n** A\nA's body\n** B\n")
+       (let ((org (current-buffer)))
+         (with-temp-buffer
+           (canvas-mindmap-mode)
+           (canvas-diagram-adopt (canvas-mindmap--diagram) (canvas-mindmap--read-source org))
+           (canvas-diagram--follow org)
+           (unwind-protect
+               (progn
+                 (canvas-diagram-set-selected (canvas-mindmap-test--labelled "A"))
+                 (canvas-diagram-copy-node)
+                 (should (equal (current-kill 0) "A\n\nA's body"))
+                 (canvas-diagram-copy-source)
+                 (should (equal (current-kill 0) "** A\nA's body"))
+                 (canvas-diagram-set-selected (canvas-mindmap-test--labelled "B"))
+                 (should-error (canvas-diagram-copy-body) :type 'user-error))
+             (canvas-diagram--release))))))))
+
+(ert-deftest canvas-mindmap-source-text-only-from-its-own-outlines ()
+  ;; GIVEN a code buffer, read by another source, and a map drawn by a
+  ;;       package that follows a buffer with a reader of its own
+  ;; WHEN source text is asked for
+  ;; THEN the code buffer gives none, AND the package's map offers none,
+  ;;      its reader in place of the outline's
+  (with-temp-buffer
+    (emacs-lisp-mode)
+    (insert "(defun f () 1)\n")
+    (should-not (canvas-mindmap--source-text nil (canvas-mindmap-node-create :label "f" :pos 1)
+                                             'header (current-buffer))))
+  (let ((diagram (canvas-mindmap--follow-diagram #'ignore)))
+    (should (eq (plist-get (canvas-diagram-callbacks diagram) :read-source) #'ignore))
+    (should-not (plist-get (canvas-diagram-callbacks diagram) :source-text))
+    (should (plist-get canvas-mindmap--callbacks :source-text))))
+
 ;;;; Folding
 
 (ert-deftest canvas-mindmap-folding-a-node-hides-its-subtree ()
@@ -1111,9 +1256,10 @@
   ;; THEN each kind comes once with its count, in order of first appearance,
   ;;      AND each gets a key under K from a letter of its own, the first
   ;;      free one of its name, o being the focus key's and never free
-  (let ((counts (canvas-mindmap--kinds-in-spec
+  (let ((counts (canvas-mindmap--counts-in-spec
                  '("R" ("a" :kind "function" ("b" :kind "variable")) ("c" :kind "file") ("d" :kind "function") ("e")
-                   ("f" :kind "object")))))
+                   ("f" :kind "object"))
+                 :kind)))
     (should (equal counts '(("function" . 2) ("variable" . 1) ("file" . 1) ("object" . 1))))
     (should (equal (canvas-mindmap--kind-keys (mapcar #'car counts))
                    '(("function" . "K f") ("variable" . "K v") ("file" . "K i") ("object" . "K b"))))))
@@ -1142,6 +1288,83 @@
       (should (= (length (canvas-diagram-nodes-shown)) 5))
       ;; AND the menu's group is made of these, parsed for transient
       (should (cl-every (lambda (o) (eq (car o) 'transient-suffix)) (canvas-mindmap--kind-children nil))))))
+
+;;;; Statuses
+
+(ert-deftest canvas-mindmap-status-badge-takes-the-table-else-the-class-colour ()
+  ;; GIVEN a table colouring TODO, and the colours of open and done keywords
+  ;; WHEN the badges of a TODO node, an unlisted open one, an unlisted done
+  ;;      one and a node without a status are asked for
+  ;; THEN they say the keyword in the table's colour, the open colour, the
+  ;;      done colour, AND the last has none
+  (let ((canvas-mindmap-statuses '(("TODO" . "red")))
+        (canvas-mindmap-status-open-color "blue")
+        (canvas-mindmap-status-done-color "green"))
+    (should (equal (canvas-mindmap--badge (canvas-mindmap-node-create :label "x" :status "TODO"))
+                   (list "TODO" (canvas-diagram-rgb "red"))))
+    (should (equal (canvas-mindmap--badge (canvas-mindmap-node-create :label "x" :status "WAIT"))
+                   (list "WAIT" (canvas-diagram-rgb "blue"))))
+    (should (equal (canvas-mindmap--badge (canvas-mindmap-node-create :label "x" :status "GAVEUP" :done t))
+                   (list "GAVEUP" (canvas-diagram-rgb "green"))))
+    (should-not (canvas-mindmap--badge (canvas-mindmap-node-create :label "x")))
+    (let ((canvas-mindmap-statuses '(("TODO" . "no such colour"))))
+      (should-error (canvas-mindmap--badge (canvas-mindmap-node-create :label "x" :status "TODO"))))))
+
+(ert-deftest canvas-mindmap-status-badges-widen-boxes-and-join-the-legend ()
+  ;; GIVEN a map with a TODO node and a plain one of the same label length
+  ;; WHEN it is shown
+  ;; THEN the TODO box is wider by its badge and the gap, AND the legend
+  ;;      lists the badge before the kinds
+  (canvas-mindmap-test--in-map-buffer '("R" ("a" :status "TODO") ("b" :kind "risk")) '(600 . 300)
+    (should (> (canvas-mindmap-node-w (canvas-mindmap-test--labelled "a"))
+               (canvas-mindmap-node-w (canvas-mindmap-test--labelled "b"))))
+    (let ((rows (mapcar #'car (canvas-diagram--legend-entries canvas-diagram--diagram))))
+      (should (member "TODO" rows))
+      (should (< (cl-position "TODO" rows :test #'equal) (cl-position "risk" rows :test #'equal))))))
+
+(ert-deftest canvas-mindmap-hiding-a-status-drops-its-nodes-but-keeps-the-way ()
+  ;; GIVEN a tree with a DONE node over a TODO one, a lone DONE node, and a
+  ;;       node of a kind
+  ;; WHEN DONE is hidden, then the kind too, then TODO, then every status
+  ;;      is shown again
+  ;; THEN the lone DONE node goes but the one over TODO stays as its way,
+  ;;      the kind goes as well, both DONE and TODO go together, AND showing
+  ;;      the statuses brings all but the hidden kind back
+  (canvas-mindmap-test--in-map-buffer '("R" ("a" :status "DONE" :done t ("b" :status "TODO"))
+                                        ("c" :status "DONE" :done t) ("d" :kind "risk"))
+      '(600 . 300)
+    (let ((shown (lambda () (mapcar #'canvas-mindmap-node-label (canvas-diagram-nodes-shown)))))
+      (canvas-mindmap-toggle-status "DONE")
+      (should (equal (funcall shown) '("R" "a" "b" "d")))
+      (canvas-mindmap-toggle-kind "risk")
+      (should (equal (funcall shown) '("R" "a" "b")))
+      (canvas-mindmap-toggle-status "TODO")
+      (should (equal (funcall shown) '("R")))
+      (canvas-mindmap-show-all-statuses)
+      (should-not canvas-mindmap--hidden-statuses)
+      (should (equal (funcall shown) '("R" "a" "b" "c"))))))
+
+(ert-deftest canvas-mindmap-the-menu-lists-the-statuses-live-and-toggles-them ()
+  ;; GIVEN a map buffer of a tree with two statuses
+  ;; WHEN the status suffixes are made and one is run
+  ;; THEN there is a suffix per status under S, saying it is shown and how
+  ;;      many there are, then one showing them all; running one hides that
+  ;;      status while the suffix says so, AND the group parses for transient
+  (canvas-mindmap-test--in-map-buffer '("R" ("a" :status "TODO") ("b" :status "DONE" :done t)
+                                        ("c" :status "TODO") ("d"))
+      '(600 . 300)
+    (let* ((suffixes (canvas-mindmap--status-suffixes))
+           (todo (cl-find "S t" suffixes :key #'car :test #'equal))
+           (say (lambda (suffix) (funcall (plist-get (cddr suffix) :description)))))
+      (should (= (length suffixes) 3))
+      (should (equal (funcall say todo) "■ TODO (2)"))
+      (should (equal (funcall say (cl-find "S d" suffixes :key #'car :test #'equal)) "■ DONE (1)"))
+      (should (equal (car (car (last suffixes))) "S S"))
+      (call-interactively (cadr todo))
+      (should (equal canvas-mindmap--hidden-statuses '("TODO")))
+      (should (equal (mapcar #'canvas-mindmap-node-label (canvas-diagram-nodes-shown)) '("R" "b" "d")))
+      (should (equal (funcall say todo) "□ TODO (2)"))
+      (should (cl-every (lambda (o) (eq (car o) 'transient-suffix)) (canvas-mindmap--status-children nil))))))
 
 ;;;; Keys and the menu
 
@@ -1217,6 +1440,40 @@
           (should (canvas-mindmap-test--png-p png)))
       (delete-file png)
       (delete-file org))))
+
+(ert-deftest canvas-mindmap-nest-hangs-each-node-off-the-nearest-lower-level ()
+  ;; GIVEN nodes at levels as a reader finds them, indents say, one of them
+  ;;       with a child of its own already, and a level stepping back
+  ;; WHEN they are nested
+  ;; THEN each hangs off the nearest earlier node of a lower level, after
+  ;;      the children it had, AND two nodes at the lowest level make two trees
+  (should (equal (canvas-mindmap-nest (list (list 2 "Root") (list 4 "A" :pos 7) (list 8 "A1")
+                                            (list 4 "B" '("B0")) (list 6 "B1")))
+                 '(("Root" ("A" :pos 7 ("A1")) ("B" ("B0") ("B1"))))))
+  (should (equal (length (canvas-mindmap-nest (list (list 1 "One") (list 1 "Two")))) 2)))
+
+;;;; Following what a reader finds
+
+(ert-deftest canvas-mindmap-follow-shows-what-a-reader-finds-and-reads-again ()
+  ;; GIVEN a reader that finds a tree in a buffer, and one that finds none
+  ;; WHEN a mind map is shown following the buffer with each
+  ;; THEN the first is shown in the mind map mode from the tree it read,
+  ;;      the buffer followed with that reader to read it again and the rest
+  ;;      of the map as ever, AND the second is a user error
+  (let ((source (generate-new-buffer " canvas-mindmap-test-source"))
+        (tree '("Root" ("A") ("B" ("B1"))))
+        shown)
+    (let ((read (lambda (_buffer) tree)))
+      (unwind-protect
+          (cl-letf (((symbol-function 'canvas-diagram-show)
+                     (lambda (name mode diagram spec &optional followed)
+                       (let ((callbacks (canvas-diagram-callbacks diagram)))
+                         (setq shown (list name mode (plist-get callbacks :read-source)
+                                           (plist-get callbacks :layout) spec followed))))))
+            (canvas-mindmap-follow source read "*mine*")
+            (should (equal shown (list "*mine*" #'canvas-mindmap-mode read #'canvas-mindmap--lay-out tree source)))
+            (should-error (canvas-mindmap-follow source #'ignore) :type 'user-error))
+        (kill-buffer source)))))
 
 ;;;; The package
 

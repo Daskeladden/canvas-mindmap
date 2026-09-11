@@ -31,8 +31,9 @@
 ;; This package is the tree: an org, markdown or imenu outline read into
 ;; nodes, laid out as a horizontal tree, folded and unfolded, walked as
 ;; a tree.  Each top-level branch has a colour that its subtree
-;; inherits; a node's kind, an org todo keyword or tag or a :kind
-;; option, outlines its box; a legend in the corner says which is which.
+;; inherits; a node's kind, a tag, a checkbox or a :kind option,
+;; outlines its box; its status, an org todo keyword, is a badge before
+;; its label; a legend in the corner says which is which.
 ;;
 ;; This is a prototype.
 
@@ -74,23 +75,47 @@ or half to each side, `both'."
   "The edges: a `curve', a `straight' line, or an `elbow'."
   :type '(choice (const curve) (const straight) (const elbow)))
 
+(defcustom canvas-mindmap-statuses
+  '(("TODO" . "dark orange") ("NEXT" . "steel blue") ("WAITING" . "gold")
+    ("DONE" . "sea green") ("CANCELLED" . "gray"))
+  "Alist of org todo keywords and the colour of their badge.
+A keyword not listed takes `canvas-mindmap-status-open-color', or
+`canvas-mindmap-status-done-color' when org counts it done."
+  :type '(alist :key-type string :value-type string))
+
+(defcustom canvas-mindmap-status-open-color "dark orange"
+  "The badge colour of an open todo keyword that `canvas-mindmap-statuses' lacks."
+  :type 'string)
+
+(defcustom canvas-mindmap-status-done-color "sea green"
+  "The badge colour of a done todo keyword that `canvas-mindmap-statuses' lacks."
+  :type 'string)
+
 ;;;; The tree
 
 (cl-defstruct (canvas-mindmap-node (:include canvas-diagram-node)
                                    (:constructor canvas-mindmap-node-create))
-  children branch collapsed (extent 0))
+  children branch collapsed (extent 0) status done)
 
 (defun canvas-mindmap--options (rest)
   "Split REST, a spec after its label, into (PLIST . CHILDREN).
-Options are keyword-value pairs before the children: :kind, :note,
-:icon and :pos, where the node came from in its buffer."
+Options are keyword-value pairs before the children: :kind, :status,
+the node's todo keyword, :done, whether org counts that keyword done,
+:note, :icon and :pos, where the node came from in its buffer."
   (let (plist)
     (while (keywordp (car rest))
-      (unless (memq (car rest) '(:kind :note :icon :pos))
+      (unless (memq (car rest) '(:kind :status :done :note :icon :pos))
         (error "canvas-mindmap: unknown option %S" (car rest)))
       (push (pop rest) plist)
       (push (pop rest) plist))
     (cons (nreverse plist) rest)))
+
+(defun canvas-mindmap--status-option (plist)
+  "The :status of PLIST, a string or nil; any other value is an error."
+  (let ((status (plist-get plist :status)))
+    (unless (or (null status) (stringp status))
+      (error "canvas-mindmap: status %S is not a string" status))
+    status))
 
 (defun canvas-mindmap--tree (spec)
   "Node tree from SPEC, a nested list (LABEL [OPTION VALUE]... CHILD...)."
@@ -100,6 +125,8 @@ Options are keyword-value pairs before the children: :kind, :note,
     (canvas-mindmap-node-create
      :label (car spec)
      :kind (plist-get plist :kind)
+     :status (canvas-mindmap--status-option plist)
+     :done (and (plist-get plist :done) t)
      :note (plist-get plist :note)
      :icon (plist-get plist :icon)
      :pos (plist-get plist :pos)
@@ -155,6 +182,22 @@ Return NODE."
       (dolist (child children)
         (canvas-mindmap--prune child (and depth (1- depth))))))
   node)
+
+(defun canvas-mindmap--status-rgb (node)
+  "The colour of NODE's status badge: its keyword's in
+`canvas-mindmap-statuses', else the open or the done colour.  A name
+that is no colour is an error."
+  (let ((name (or (cdr (assoc (canvas-mindmap-node-status node) canvas-mindmap-statuses))
+                  (if (canvas-mindmap-node-done node)
+                      canvas-mindmap-status-done-color
+                    canvas-mindmap-status-open-color))))
+    (or (canvas-diagram-rgb name)
+        (error "canvas-mindmap: %S is no colour, for the status %s" name (canvas-mindmap-node-status node)))))
+
+(defun canvas-mindmap--badge (node)
+  "NODE's badge, (KEYWORD RGB) for its status, or nil without one."
+  (when-let* ((status (canvas-mindmap-node-status node)))
+    (list status (canvas-mindmap--status-rgb node))))
 
 (defun canvas-mindmap--node-text (node)
   "What NODE's box says: its label, and how many children it hides."
@@ -333,26 +376,72 @@ the line that opens or closes a code block, and a line to leave out.")
                                (lambda (link) (or (match-string 2 link) (match-string 1 link)))
                                text)))))
 
-(defun canvas-mindmap--todo-keywords ()
-  "The buffer's org todo keywords, or the two every org buffer has."
-  (or (bound-and-true-p org-todo-keywords-1) '("TODO" "DONE")))
+(defvar org-todo-keywords)
+(defvar org-todo-keywords-1)
+(defvar org-done-keywords)
 
-(defun canvas-mindmap--parse-title (title)
-  "Split TITLE into (LABEL KIND).
-A leading todo keyword is the kind, lower-cased; failing that, the
-first tag."
-  (let (kind)
+(defconst canvas-mindmap--todo-line-re "^[ \t]*#\\+\\(?:SEQ_\\|TYP_\\)?TODO:[ \t]*\\(.*\\)$"
+  "A line giving the file's own todo keywords, as org reads them.")
+
+(defun canvas-mindmap--todo-words (words)
+  "The keywords of the org todo sequence WORDS as ((KEYWORD . DONE)...):
+those after the bar are done, or the last one when there is none.  The
+fast-access keys and logging, (t) or (d!) say, are left off."
+  (let* ((words (mapcar (lambda (w) (replace-regexp-in-string "(.*)\\'" "" w)) words))
+         (bar (cl-position "|" words :test #'equal))
+         (open (if bar (cl-subseq words 0 bar) (butlast words)))
+         (done (if bar (nthcdr (1+ bar) words) (last words))))
+    (append (mapcar #'list open)
+            (mapcar (lambda (word) (cons word t)) done))))
+
+(defun canvas-mindmap--todo-lines ()
+  "The todo sequences the buffer's #+TODO lines give, each a list of words."
+  (save-excursion
+    (save-restriction
+      (widen)
+      (goto-char (point-min))
+      (let ((case-fold-search t) sequences)
+        (while (re-search-forward canvas-mindmap--todo-line-re nil t)
+          (push (split-string (match-string 1) "[ \t]+" t) sequences))
+        (nreverse sequences)))))
+
+(defun canvas-mindmap--org-sequences ()
+  "The todo sequences of `org-todo-keywords', each a list of words, when
+org is loaded; its older form, a flat list of keywords, is one."
+  (let ((keywords (bound-and-true-p org-todo-keywords)))
+    (if (stringp (car keywords))
+        (list keywords)
+      (mapcar #'cdr keywords))))
+
+(defun canvas-mindmap--todo-keywords ()
+  "The buffer's org todo keywords as ((KEYWORD . DONE)...), DONE when org
+counts the keyword done: org's own in an org buffer, else those of the
+buffer's #+TODO lines, else `org-todo-keywords', else TODO and DONE."
+  (if (bound-and-true-p org-todo-keywords-1)
+      (mapcar (lambda (keyword) (cons keyword (and (member keyword org-done-keywords) t)))
+              org-todo-keywords-1)
+    (cl-mapcan #'canvas-mindmap--todo-words
+               (or (canvas-mindmap--todo-lines) (canvas-mindmap--org-sequences) '(("TODO" "DONE"))))))
+
+(defun canvas-mindmap--parse-title (title keywords)
+  "Split TITLE into (LABEL . OPTIONS): a leading keyword of KEYWORDS,
+\((KEYWORD . DONE)...), is its :status, with :done when it is done; the
+first tag its :kind."
+  (let (kind status)
     (when (string-match canvas-mindmap--tags-re title)
       ;; Read the match before `split-string' runs a search of its own.
       (let ((tags (match-string 1 title))
             (cut (match-beginning 0)))
         (setq kind (car (split-string tags ":" t))
               title (substring title 0 cut))))
-    (when (and (string-match "^\\([[:upper:]]+\\)[ \t]+" title)
-               (member (match-string 1 title) (canvas-mindmap--todo-keywords)))
-      (setq kind (downcase (match-string 1 title))
+    (when (and (string-match "^\\([[:upper:]][[:upper:][:digit:]_-]*\\)[ \t]+" title)
+               (assoc (match-string 1 title) keywords))
+      (setq status (assoc (match-string 1 title) keywords)
             title (substring title (match-end 0))))
-    (list (canvas-mindmap--clean-label title) kind)))
+    (cons (canvas-mindmap--clean-label title)
+          (append (and kind (list :kind kind))
+                  (and status (list :status (car status)))
+                  (and (cdr status) (list :done t))))))
 
 (defvar canvas-mindmap--with-positions nil
   "Whether specs read from a buffer carry :pos, where each node starts.
@@ -409,54 +498,61 @@ lines, less blanks and those matching KEYWORD-RE, make the note."
     (nreverse lines)))
 
 (defun canvas-mindmap--headings (dialect)
-  "List of (LEVEL LABEL KIND NOTE ITEMS POS) for the buffer's headings,
-in order, org or markdown by DIALECT.  ITEMS are the specs of the plain
-list items under the heading, POS is where it starts."
+  "List of (LEVEL LABEL OPTIONS NOTE ITEMS POS) for the buffer's headings,
+in order, org or markdown by DIALECT.  OPTIONS are the :kind, :status
+and :done its title gives, ITEMS the specs of the plain list items under
+the heading, POS where it starts."
   (let ((heading-re (canvas-mindmap--dialect-re dialect :heading))
         (keyword-re (canvas-mindmap--dialect-re dialect :keyword))
+        (keywords (canvas-mindmap--todo-keywords))
         headings current body)
     (cl-flet ((finish ()
                 (when current
-                  (let ((parsed (canvas-mindmap--body-items (nreverse body) keyword-re)))
-                    (push (append current (list (car parsed) (cdr parsed) (car (last current))))
-                          headings)))))
+                  (pcase-let ((`(,level ,label ,options ,pos) current)
+                              (`(,note . ,items) (canvas-mindmap--body-items (nreverse body) keyword-re)))
+                    (push (list level label options note items pos) headings)))))
       (pcase-dolist (`(,pos . ,text) (canvas-mindmap--lines dialect))
         (if (string-match heading-re text)
             (let ((level (length (match-string 1 text)))
-                  (title (canvas-mindmap--parse-title (match-string 2 text))))
+                  (title (canvas-mindmap--parse-title (match-string 2 text) keywords)))
               (finish)
-              (setq current (list level (car title) (cadr title) pos)
+              (setq current (list level (car title) (cdr title) pos)
                     body nil))
           (when current
             (push (cons pos text) body))))
       (finish))
-    (mapcar (lambda (h) (pcase-let ((`(,level ,label ,kind ,_pos ,note ,items ,pos) h))
-                          (list level label kind note items pos)))
-            (nreverse headings))))
+    (nreverse headings)))
 
 (defun canvas-mindmap--heading-spec (heading)
-  "Spec (LABEL [:kind KIND] [:note NOTE] [:pos POS] ITEM...) of HEADING,
-a (LEVEL LABEL KIND NOTE ITEMS POS).  Sub-headings are appended later."
-  (pcase-let ((`(,_ ,label ,kind ,note ,items ,pos) heading))
+  "Spec (LABEL [:kind KIND] [:status STATUS [:done t]] [:note NOTE] [:pos
+POS] ITEM...) of HEADING, a (LEVEL LABEL OPTIONS NOTE ITEMS POS).
+Sub-headings are appended later."
+  (pcase-let ((`(,_ ,label ,options ,note ,items ,pos) heading))
     (append (list label)
-            (and kind (list :kind kind))
+            options
             (and note (list :note note))
             (canvas-mindmap-pos-option pos)
             items)))
 
-(defun canvas-mindmap--forest (headings)
-  "Nested specs from HEADINGS, each a (LEVEL LABEL KIND NOTE ITEMS POS).
-A heading hangs off the nearest earlier heading of a shallower level."
+(defun canvas-mindmap-nest (items)
+  "Nested specs from ITEMS, each (LEVEL . SPEC), SPEC a node's spec as a
+source reads it, its children to come: a node hangs off the nearest
+earlier node of a lower level, after the children it has.  Each node
+at the lowest level is a tree of its own.  The specs are changed."
   (let ((root (list "forest"))
         stack)                          ; (LEVEL . SPEC), innermost first
-    (dolist (heading headings)
-      (let ((node (canvas-mindmap--heading-spec heading))
-            (level (car heading)))
-        (while (and stack (>= (caar stack) level))
-          (pop stack))
-        (setcdr (last (if stack (cdar stack) root)) (list node))
-        (push (cons level node) stack)))
+    (pcase-dolist (`(,level . ,node) items)
+      (while (and stack (>= (caar stack) level))
+        (pop stack))
+      (setcdr (last (if stack (cdar stack) root)) (list node))
+      (push (cons level node) stack))
     (cdr root)))
+
+(defun canvas-mindmap--forest (headings)
+  "Nested specs from HEADINGS, each a (LEVEL LABEL OPTIONS NOTE ITEMS POS).
+A heading hangs off the nearest earlier heading of a shallower level."
+  (canvas-mindmap-nest (mapcar (lambda (heading) (cons (car heading) (canvas-mindmap--heading-spec heading)))
+                               headings)))
 
 (defconst canvas-mindmap--category-kinds
   '(("functions" . "function") ("classes" . "class") ("variables" . "variable")
@@ -737,6 +833,61 @@ Several top-level headings hang off a root named after the file."
     (let ((canvas-mindmap--with-positions t))
       (canvas-mindmap--headings-tree (buffer-name)))))
 
+;;;; The source text of a node
+
+(defun canvas-mindmap--next-heading (dialect pos)
+  "Where the first heading of DIALECT after the line at POS starts, the
+lines of code blocks skipped; the buffer's end when there is none."
+  (let ((heading-re (canvas-mindmap--dialect-re dialect :heading)))
+    (or (car (cl-find-if (lambda (line) (and (> (car line) pos) (string-match-p heading-re (cdr line))))
+                         (canvas-mindmap--lines dialect)))
+        (point-max))))
+
+(defun canvas-mindmap--item-end (pos)
+  "Where the list item whose line starts at POS ends: at its last line
+indented deeper than it, before the first line that is not."
+  (save-excursion
+    (goto-char pos)
+    (let ((indent (current-indentation))
+          (end (line-end-position)))
+      (forward-line 1)
+      (while (and (not (eobp))
+                  (or (looking-at-p "[ \t]*$") (> (current-indentation) indent)))
+        (unless (looking-at-p "[ \t]*$")
+          (setq end (line-end-position)))
+        (forward-line 1))
+      end)))
+
+(defun canvas-mindmap--outline-text (dialect pos part)
+  "PART, `header', `body' or `all', of the node of the current buffer's
+DIALECT outline whose line starts at POS, a heading or a list item.  The
+header is its line, the body the lines up to the next heading, or for an
+item those indented deeper below it; nil for an empty part."
+  (save-excursion
+    (save-restriction
+      (widen)
+      (goto-char pos)
+      (let* ((start (line-beginning-position))
+             (header-end (line-end-position))
+             (end (if (looking-at-p (canvas-mindmap--dialect-re dialect :heading))
+                      (canvas-mindmap--next-heading dialect start)
+                    (canvas-mindmap--item-end start)))
+             (body (string-trim (buffer-substring-no-properties header-end (max header-end end))
+                                "[ \t\n]*\n" "[ \t\n]+")))
+        (pcase part
+          ('header (buffer-substring-no-properties start header-end))
+          ('body (and (not (string-empty-p body)) body))
+          ('all (string-trim-right (buffer-substring-no-properties start (max header-end end))))
+          (_ (error "canvas-mindmap: a node has no part %S" part)))))))
+
+(defun canvas-mindmap--source-text (_diagram node part buffer)
+  "PART of the text NODE came from in BUFFER, when the map is of an org or
+markdown outline of it; nil when another source read it."
+  (with-current-buffer buffer
+    (let ((dialect (canvas-mindmap--dialect)))
+      (and (memq dialect '(org markdown))
+           (canvas-mindmap--outline-text dialect (canvas-diagram-node-pos node) part)))))
+
 (defun canvas-mindmap--tree-of (source)
   "Node tree of SOURCE, a nested spec or the name of an org file.
 Its branches are numbered and it is folded at `canvas-mindmap-depth'."
@@ -818,8 +969,10 @@ ROOT's own children are put back afterwards."
                                        (canvas-mindmap-node-y n) (- (canvas-mindmap-node-y n) min-y))))))
 
 (defun canvas-mindmap--size (node measure)
-  "Give every node shown in NODE's subtree the box MEASURE says it needs."
-  (let ((size (canvas-diagram-box-size node (canvas-mindmap--node-text node) measure)))
+  "Give every node shown in NODE's subtree the box MEASURE says it needs,
+its badge's room too."
+  (let ((size (canvas-diagram-box-size node (canvas-mindmap--node-text node) measure
+                                       (car (canvas-mindmap--badge node)))))
     (setf (canvas-mindmap-node-w node) (car size)
           (canvas-mindmap-node-h node) (cdr size)))
   (dolist (child (canvas-mindmap--shown-children node))
@@ -1070,61 +1223,91 @@ one level, two, and so on, then all of them, then one again."
       (setq canvas-mindmap-depth (and (< depth (canvas-mindmap--levels)) depth)))
     (canvas-diagram-rebuild)))
 
-;;;; Filtering by kind
+;;;; Filtering by kind and by status
 
 (defvar-local canvas-mindmap--hidden-kinds nil
   "The kinds of node this map leaves out, as strings.")
 
-(defun canvas-mindmap--keep-p (node hidden)
-  "Whether NODE stays in a map without the kinds HIDDEN: its own kind is
-shown, or something below it stays.  Its subtree is filtered first."
-  (canvas-mindmap--filter-kinds node hidden)
-  (or (not (member (canvas-mindmap-node-kind node) hidden))
+(defvar-local canvas-mindmap--hidden-statuses nil
+  "The statuses, todo keywords, of node this map leaves out, as strings.")
+
+(defun canvas-mindmap--hidden-p (node kinds statuses)
+  "Whether NODE itself is left out: its kind is one of KINDS, or its
+status one of STATUSES."
+  (let ((kind (canvas-mindmap-node-kind node))
+        (status (canvas-mindmap-node-status node)))
+    (or (and kind (member kind kinds) t)
+        (and status (member status statuses) t))))
+
+(defun canvas-mindmap--keep-p (node kinds statuses)
+  "Whether NODE stays in a map without the KINDS and the STATUSES: it is
+not left out itself, or something below it stays.  Its subtree is
+filtered first."
+  (canvas-mindmap--filter node kinds statuses)
+  (or (not (canvas-mindmap--hidden-p node kinds statuses))
       (and (canvas-mindmap-node-children node) t)))
 
-(defun canvas-mindmap--filter-kinds (node hidden)
-  "Take the nodes of the kinds HIDDEN out of NODE's tree, save those on the
-way to nodes kept.  Return NODE."
+(defun canvas-mindmap--filter (node kinds statuses)
+  "Take the nodes of the KINDS and the STATUSES out of NODE's tree, save
+those on the way to nodes kept.  Return NODE."
   (setf (canvas-mindmap-node-children node)
-        (cl-remove-if-not (lambda (child) (canvas-mindmap--keep-p child hidden))
+        (cl-remove-if-not (lambda (child) (canvas-mindmap--keep-p child kinds statuses))
                           (canvas-mindmap-node-children node)))
   node)
 
-(defun canvas-mindmap--kinds-in-spec (spec)
-  "The kinds in SPEC with how many nodes have each: ((KIND . COUNT)...), in
-order of first appearance."
+(defun canvas-mindmap--counts-in-spec (spec option)
+  "The values of OPTION, :kind or :status, in SPEC with how many nodes
+have each: ((VALUE . COUNT)...), in order of first appearance."
   (let (counts)
     (cl-labels ((walk (node)
                   (pcase-let ((`(,plist . ,children) (canvas-mindmap--options (cdr node))))
-                    (when-let* ((kind (plist-get plist :kind)))
-                      (if-let* ((entry (assoc kind counts)))
+                    (when-let* ((value (plist-get plist option)))
+                      (if-let* ((entry (assoc value counts)))
                           (cl-incf (cdr entry))
-                        (push (cons kind 1) counts)))
+                        (push (cons value 1) counts)))
                     (mapc #'walk children))))
       (walk spec))
     (nreverse counts)))
 
-(defun canvas-mindmap--kind-keys (kinds)
-  "A key under K for each of KINDS, ((KIND . KEY)...): the first letter of
-its name not taken by an earlier kind, o being the focus key's, else a
-digit."
-  (let ((taken (list ?o)) keys)
-    (dolist (kind kinds)
+(defun canvas-mindmap--spec-values (option)
+  "The values of OPTION in this map's spec, in order of first appearance."
+  (mapcar #'car (canvas-mindmap--counts-in-spec (canvas-diagram-spec canvas-diagram--diagram) option)))
+
+(defun canvas-mindmap--toggle-keys (values prefix taken)
+  "A key under PREFIX for each of VALUES, ((VALUE . KEY)...): the first
+letter of its name, lower-cased, that neither TAKEN, a list of
+characters, nor an earlier value has, else a digit."
+  (let (keys)
+    (dolist (value values)
       (let ((letter (or (cl-find-if (lambda (c) (and (string-match-p "[a-z]" (string c)) (not (memq c taken))))
-                                    (downcase kind))
+                                    (downcase value))
                         (cl-find-if (lambda (c) (not (memq c taken))) "123456789"))))
         (push letter taken)
-        (push (cons kind (format "K %c" letter)) keys)))
+        (push (cons value (format "%s %c" prefix letter)) keys)))
     (nreverse keys)))
+
+(defun canvas-mindmap--kind-keys (kinds)
+  "A key under K for each of KINDS, ((KIND . KEY)...), o being the focus
+key's."
+  (canvas-mindmap--toggle-keys kinds "K" (list ?o)))
+
+(defun canvas-mindmap--toggled (value hidden)
+  "HIDDEN, a list of strings, with VALUE taken out when it is in, else put in."
+  (if (member value hidden)
+      (remove value hidden)
+    (cons value hidden)))
 
 (defun canvas-mindmap-toggle-kind (kind)
   "Leave the nodes of KIND out of the map, or take them back in."
-  (interactive (list (completing-read "Kind: " (mapcar #'car (canvas-mindmap--kinds-in-spec
-                                                             (canvas-diagram-spec canvas-diagram--diagram))))))
-  (setq canvas-mindmap--hidden-kinds
-        (if (member kind canvas-mindmap--hidden-kinds)
-            (remove kind canvas-mindmap--hidden-kinds)
-          (cons kind canvas-mindmap--hidden-kinds)))
+  (interactive (list (completing-read "Kind: " (canvas-mindmap--spec-values :kind))))
+  (setq canvas-mindmap--hidden-kinds (canvas-mindmap--toggled kind canvas-mindmap--hidden-kinds))
+  (canvas-diagram-rebuild))
+
+(defun canvas-mindmap-toggle-status (status)
+  "Leave the nodes of STATUS, a todo keyword, out of the map, or take
+them back in."
+  (interactive (list (completing-read "Status: " (canvas-mindmap--spec-values :status))))
+  (setq canvas-mindmap--hidden-statuses (canvas-mindmap--toggled status canvas-mindmap--hidden-statuses))
   (canvas-diagram-rebuild))
 
 (defun canvas-mindmap-show-all-kinds ()
@@ -1133,9 +1316,15 @@ digit."
   (setq canvas-mindmap--hidden-kinds nil)
   (canvas-diagram-rebuild))
 
+(defun canvas-mindmap-show-all-statuses ()
+  "Take every status back into the map."
+  (interactive)
+  (setq canvas-mindmap--hidden-statuses nil)
+  (canvas-diagram-rebuild))
+
 (defun canvas-mindmap--kinds ()
   "The kinds of this map, in order of first appearance."
-  (mapcar #'car (canvas-mindmap--kinds-in-spec (canvas-diagram-spec canvas-diagram--diagram))))
+  (canvas-mindmap--spec-values :kind))
 
 (defun canvas-mindmap--focused-kind ()
   "The one kind the map shows, when every other is hidden; else nil."
@@ -1154,28 +1343,36 @@ now, round and round."
     (setq canvas-mindmap--hidden-kinds (remove next kinds))
     (canvas-diagram-rebuild)))
 
-(defun canvas-mindmap--kind-command (kind)
-  "A command toggling KIND, named for it, so the menu has one to bind."
-  (let ((symbol (intern (format "canvas-mindmap-toggle-kind/%s" kind))))
+(defun canvas-mindmap--toggle-command (what value toggle)
+  "A command calling TOGGLE with VALUE, named for WHAT, kind or status,
+and VALUE, so the menu has one to bind."
+  (let ((symbol (intern (format "canvas-mindmap-toggle-%s/%s" what value))))
     (unless (fboundp symbol)
-      (defalias symbol (lambda () (interactive) (canvas-mindmap-toggle-kind kind))
-        (format "Leave the nodes of kind %s out of the map, or take them back in." kind)))
+      (defalias symbol (lambda () (interactive) (funcall toggle value))
+        (format "Leave the nodes of %s %s out of the map, or take them back in." what value)))
     symbol))
+
+(defun canvas-mindmap--toggle-suffixes (counts keys command hidden)
+  "Menu suffixes toggling each value of COUNTS, ((VALUE . COUNT)...), under
+its key in KEYS, by the command COMMAND gives for it.  Each says whether
+the value is in HIDDEN, a variable, and how many nodes have it."
+  (mapcar (lambda (entry)
+            (let ((value (car entry)))
+              (list (cdr (assoc value keys)) (funcall command value)
+                    :transient t
+                    :description (lambda ()
+                                   (format "%s %s (%d)" (if (member value (symbol-value hidden)) "□" "■")
+                                           value (cdr entry))))))
+          counts))
 
 (defun canvas-mindmap--kind-suffixes ()
   "The menu's suffixes for this map's kinds: one toggling each, saying
 whether it shows and how many nodes it has, and one showing them all."
-  (let* ((counts (canvas-mindmap--kinds-in-spec (canvas-diagram-spec canvas-diagram--diagram)))
-         (keys (canvas-mindmap--kind-keys (mapcar #'car counts))))
-    (append (mapcar (lambda (entry)
-                      (let ((kind (car entry)))
-                        (list (cdr (assoc kind keys)) (canvas-mindmap--kind-command kind)
-                              :transient t
-                              :description (lambda ()
-                                             (format "%s %s (%d)"
-                                                     (if (member kind canvas-mindmap--hidden-kinds) "□" "■")
-                                                     kind (cdr entry))))))
-                    counts)
+  (let ((counts (canvas-mindmap--counts-in-spec (canvas-diagram-spec canvas-diagram--diagram) :kind)))
+    (append (canvas-mindmap--toggle-suffixes
+             counts (canvas-mindmap--kind-keys (mapcar #'car counts))
+             (lambda (kind) (canvas-mindmap--toggle-command "kind" kind #'canvas-mindmap-toggle-kind))
+             'canvas-mindmap--hidden-kinds)
             (list (list "K o" #'canvas-mindmap-focus-next-kind :transient t
                         :description (lambda ()
                                        (if-let* ((kind (canvas-mindmap--focused-kind)))
@@ -1183,17 +1380,33 @@ whether it shows and how many nodes it has, and one showing them all."
                                          "only the next kind")))
                   (list "K K" #'canvas-mindmap-show-all-kinds :transient t :description "every kind again")))))
 
+(defun canvas-mindmap--status-suffixes ()
+  "The menu's suffixes for this map's statuses, under S: one toggling
+each, saying whether it shows and how many nodes have it, and one
+showing them all.  None for a map without statuses."
+  (when-let* ((counts (canvas-mindmap--counts-in-spec (canvas-diagram-spec canvas-diagram--diagram) :status)))
+    (append (canvas-mindmap--toggle-suffixes
+             counts (canvas-mindmap--toggle-keys (mapcar #'car counts) "S" nil)
+             (lambda (status) (canvas-mindmap--toggle-command "status" status #'canvas-mindmap-toggle-status))
+             'canvas-mindmap--hidden-statuses)
+            (list (list "S S" #'canvas-mindmap-show-all-statuses :transient t :description "every status again")))))
+
 (defun canvas-mindmap--kind-children (_children)
   "The menu's Kinds group, made when the menu opens, of this map's kinds."
   (transient-parse-suffixes 'canvas-mindmap-menu (canvas-mindmap--kind-suffixes)))
 
+(defun canvas-mindmap--status-children (_children)
+  "The menu's Statuses group, made when the menu opens, of this map's statuses."
+  (transient-parse-suffixes 'canvas-mindmap-menu (canvas-mindmap--status-suffixes)))
+
 ;;;; The diagram: how the tree plugs into canvas-diagram
 
 (defun canvas-mindmap--build (_diagram spec)
-  "The tree SPEC describes, less the kinds hidden, folded at the level
-limit and by hand."
+  "The tree SPEC describes, less the kinds and the statuses hidden, folded
+at the level limit and by hand."
   (canvas-mindmap--apply-folds
-   (canvas-mindmap--filter-kinds (canvas-mindmap--tree-of spec) canvas-mindmap--hidden-kinds)))
+   (canvas-mindmap--filter (canvas-mindmap--tree-of spec)
+                           canvas-mindmap--hidden-kinds canvas-mindmap--hidden-statuses)))
 
 (defun canvas-mindmap--lay-out (diagram ctx)
   "Lay DIAGRAM's tree out on CTX; the nodes shown, in reading order."
@@ -1252,6 +1465,7 @@ nearest one shown."
         :node-rgb (lambda (_diagram node)
                     (canvas-mindmap--branch-rgb (canvas-mindmap-node-branch node)))
         :node-text (lambda (_diagram node) (canvas-mindmap--node-text node))
+        :badge (lambda (_diagram node) (canvas-mindmap--badge node))
         :header (lambda (diagram node)
                   (mapconcat #'identity (canvas-mindmap--path (canvas-diagram-model diagram) node)
                              " › "))
@@ -1263,6 +1477,7 @@ nearest one shown."
         :restore #'canvas-mindmap--restore
         :double-click (lambda (_diagram node) (canvas-mindmap-toggle-collapse node))
         :read-source #'canvas-mindmap--read-source
+        :source-text #'canvas-mindmap--source-text
         :menu 'canvas-mindmap-menu)
   "How the tree plugs into canvas-diagram.")
 
@@ -1313,7 +1528,9 @@ it: a child, the parent, the next and previous node in reading order;
 the list commands walk the siblings and the hierarchy; the defun
 commands go from branch to branch; \\[canvas-diagram-jump] jumps to a
 node by name.  \\[canvas-diagram-toggle-card] opens the node's card,
-\\[canvas-diagram-visit-source] goes to its line in the source.
+\\[canvas-diagram-visit-source] goes to its line in the source,
+\\[canvas-diagram-copy-node] copies its label and note, and with a
+prefix argument its heading and body in the source.
 \\[canvas-mindmap-toggle-collapse] folds and unfolds as in magit,
 \\[canvas-mindmap-cycle-node] cycles a node and
 \\[canvas-mindmap-cycle-global] the whole map; the digits show levels
@@ -1335,7 +1552,8 @@ the map's own keys and the mouse, so the effect can be tried at once."
    ("[" canvas-mindmap-shallower :transient t
     :description (lambda () (canvas-diagram-setting "levels" 'canvas-mindmap-depth "all")))
    ("]" canvas-mindmap-deeper :transient t :description "one level more")]
-  [:description "Kinds" :class transient-column :setup-children canvas-mindmap--kind-children])
+  [:description "Kinds" :class transient-column :setup-children canvas-mindmap--kind-children]
+  [:description "Statuses" :class transient-column :setup-children canvas-mindmap--status-children])
 
 ;;;; Showing and exporting
 
@@ -1353,6 +1571,25 @@ a buffer follows it: the map is drawn again once typing there pauses."
                      (t (user-error "canvas-mindmap: no headings in %s" (buffer-name))))))
     (canvas-diagram-show "*canvas-mindmap*" #'canvas-mindmap-mode
                          (canvas-mindmap--diagram) tree source)))
+
+(defun canvas-mindmap--follow-diagram (read)
+  "A fresh diagram of a mind map that READ, a package's reader, finds in
+the buffer it follows.  The outline's source text is not the package's,
+so it has none."
+  (canvas-diagram-create :callbacks (append (list :read-source read :source-text nil)
+                                            canvas-mindmap--callbacks)))
+
+(defun canvas-mindmap-follow (buffer read &optional name)
+  "Show the tree READ finds in BUFFER as a mind map, in the buffer NAME or
+*canvas-mindmap*, and follow BUFFER: once typing there pauses, READ
+reads it again and a changed tree is drawn.  READ is a function of a
+buffer giving a nested spec, or nil when it finds none, the last map
+then staying.  Return the buffer."
+  (canvas-diagram-show (or name "*canvas-mindmap*") #'canvas-mindmap-mode
+                       (canvas-mindmap--follow-diagram read)
+                       (or (funcall read buffer)
+                           (user-error "canvas-mindmap: no tree to draw in %s" (buffer-name buffer)))
+                       buffer))
 
 ;;;###autoload
 (defun canvas-mindmap-show-file (file)
