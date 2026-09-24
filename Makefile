@@ -2,11 +2,12 @@
 
 EMACS   ?= emacs
 DIAGRAM ?= ../canvas-diagram
+KEYS    ?= ../canvas-keys
 
 .PHONY: test module clean
 
 test: module
-	$(EMACS) -Q --batch -L . -L $(DIAGRAM) -L tests \
+	$(EMACS) -Q --batch -L . -L $(DIAGRAM) -L $(KEYS) -L tests \
 	  -l tests/canvas-mindmap-tests.el \
 	  --eval '(ert-run-tests-batch-and-exit)'
 

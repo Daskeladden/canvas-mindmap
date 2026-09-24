@@ -56,22 +56,29 @@
           (canvas-diagram-nodes diagram) (canvas-mindmap--lay-out diagram ctx))
     diagram))
 
-(defmacro canvas-mindmap-test--in-map-buffer (spec size &rest body)
-  "Run BODY in a map buffer showing SPEC on a canvas of SIZE."
-  (declare (indent 2))
+(defmacro canvas-mindmap-test--in-map-buffer-at-depth (depth spec size &rest body)
+  "Run BODY in a map buffer showing SPEC on a canvas of SIZE, the map
+opened with DEPTH as `canvas-mindmap-depth'."
+  (declare (indent 3))
   `(canvas-mindmap-test--rendering
-    (with-temp-buffer
-      (canvas-mindmap-mode)
-      (canvas-diagram-adopt (canvas-mindmap--diagram) ,spec)
-      (plist-put (cdr canvas-diagram--canvas) :data-width (car ,size))
-      (plist-put (cdr canvas-diagram--canvas) :data-height (cdr ,size))
-      (unwind-protect (progn ,@body)
-        (canvas-diagram--release)))))
+    (let ((canvas-mindmap-depth ,depth))
+      (with-temp-buffer
+        (canvas-mindmap-mode)
+        (canvas-diagram-adopt (canvas-mindmap--diagram) ,spec)
+        (plist-put (cdr canvas-diagram--canvas) :data-width (car ,size))
+        (plist-put (cdr canvas-diagram--canvas) :data-height (cdr ,size))
+        (unwind-protect (progn ,@body)
+          (canvas-diagram--release))))))
+
+(defmacro canvas-mindmap-test--in-map-buffer (spec size &rest body)
+  "Run BODY in a map buffer showing SPEC on a canvas of SIZE, all of it open."
+  (declare (indent 2))
+  `(canvas-mindmap-test--in-map-buffer-at-depth nil ,spec ,size ,@body))
 
 (defun canvas-mindmap-test--labelled (label)
   "The node called LABEL in this buffer's map, shown or folded away."
   (let (found)
-    (canvas-mindmap--walk-all (canvas-mindmap--root)
+    (canvas-mindmap--walk-all (canvas-diagram-current-model)
                               (lambda (n) (when (equal (canvas-mindmap-node-label n) label)
                                             (setq found n))))
     found))
@@ -79,6 +86,10 @@
 (defun canvas-mindmap-test--selected ()
   "The label of the selected node."
   (canvas-mindmap-node-label (canvas-diagram-selected)))
+
+(defun canvas-mindmap-test--shown-labels ()
+  "The labels of the nodes this buffer's map shows, in reading order."
+  (mapcar #'canvas-mindmap-node-label (canvas-diagram-nodes-shown)))
 
 (defun canvas-mindmap-test--inside (node)
   "A canvas pixel just inside NODE's top-left corner, at a ten pixel margin."
@@ -150,6 +161,31 @@
     (should (equal (canvas-mindmap--path root a1) '("R" "A" "A1")))
     (should (equal (canvas-mindmap--path root root) '("R")))
     (should-not (canvas-mindmap--path root (canvas-mindmap--tree '("X"))))))
+
+(ert-deftest canvas-mindmap-key-is-the-label-path-without-repeated-labels ()
+  ;; GIVEN a tree whose siblings all have labels of their own
+  ;; WHEN the keys of a grandchild and of the root are asked for
+  ;; THEN each key is the plain label path, AND a node from elsewhere is an error
+  (let* ((root (canvas-mindmap--tree-of '("R" ("A" ("A1")) ("B"))))
+         (a1 (car (canvas-mindmap-node-children (car (canvas-mindmap-node-children root))))))
+    (should (equal (canvas-mindmap--key root a1) '("R" "A" "A1")))
+    (should (equal (canvas-mindmap--key root root) '("R")))
+    (should-error (canvas-mindmap--key root (canvas-mindmap--tree '("X"))))))
+
+(ert-deftest canvas-mindmap-key-counts-a-label-that-repeats-among-siblings ()
+  ;; GIVEN a branch whose children are labelled "x", "y", "x" and "x"
+  ;; WHEN the keys of the children are asked for, and nodes are found by them
+  ;; THEN the first "x" and "y" keep their labels, the later "x" carry their
+  ;;      place among the "x", each key finds its own node, AND a key whose
+  ;;      node is gone finds the last node on the way
+  (let* ((root (canvas-mindmap--tree-of '("R" ("A" ("x") ("y") ("x" ("x1")) ("x")))))
+         (a (car (canvas-mindmap-node-children root)))
+         (children (canvas-mindmap-node-children a)))
+    (should (equal (mapcar (lambda (child) (car (last (canvas-mindmap--key root child)))) children)
+                   '("x" "y" ("x" . 2) ("x" . 3))))
+    (dolist (child children)
+      (should (eq (canvas-mindmap--node-by-key root (canvas-mindmap--key root child)) child)))
+    (should (eq (canvas-mindmap--node-by-key root '("R" "A" ("x" . 4))) a))))
 
 (ert-deftest canvas-mindmap-org-headings-become-a-tree ()
   ;; GIVEN an org buffer with one top-level heading, nested children and
@@ -233,26 +269,6 @@
   (with-temp-buffer
     (insert "* About [[file:fpga.org][FPGAs]]  today\n")
     (should (equal (canvas-mindmap--headings-tree) '("About FPGAs today")))))
-
-(ert-deftest canvas-mindmap-depth-cuts-the-tree-and-counts-what-is-cut ()
-  ;; GIVEN a three-level spec and a depth of one
-  ;; WHEN the tree is built
-  ;; THEN the grandchildren are folded away, their parent says how many,
-  ;;      AND without a depth everything is there
-  (let ((spec '("R" ("A" ("A1") ("A2")) ("B"))))
-    (let* ((canvas-mindmap-depth 1)
-           (root (canvas-mindmap--tree-of spec))
-           (a (car (canvas-mindmap-node-children root))))
-      (should-not (canvas-mindmap--shown-children a))
-      (should (= (length (canvas-mindmap-node-children a)) 2))
-      (should (= (canvas-mindmap--hidden a) 2))
-      (should (equal (canvas-mindmap--node-text a) "A +2"))
-      (should (equal (canvas-mindmap--node-text root) "R"))
-      (should (= (length (canvas-mindmap--preorder root)) 3)))
-    (let* ((canvas-mindmap-depth nil)
-           (root (canvas-mindmap--tree-of spec)))
-      (should (= (length (canvas-mindmap--preorder root)) 5)))
-    (should (= (canvas-mindmap--spec-depth spec) 2))))
 
 (ert-deftest canvas-mindmap-markdown-headings-and-lists-become-a-tree ()
   ;; GIVEN a markdown buffer with # headings, a nested list with a ticked box
@@ -661,16 +677,16 @@
                (measures 'airy) (measures 'normal) (measures 'compact)))))
 
 (ert-deftest canvas-mindmap-layout-callback-lists-the-shown-nodes-in-reading-order ()
-  ;; GIVEN a spec with a folded branch
-  ;; WHEN the diagram is built and laid out through the callbacks
-  ;; THEN the nodes are the shown ones, parents before children
-  (canvas-mindmap-test--rendering
-   (canvas-mindmap-test--with-context ctx 4 4
-     (let* ((canvas-mindmap-depth 1)
-            (diagram (canvas-mindmap-test--laid-out '("R" ("A" ("A1")) ("B")) ctx)))
-       (should (equal (mapcar #'canvas-mindmap-node-label (canvas-diagram-nodes diagram))
-                      '("R" "A" "B")))
-       (should (> (canvas-mindmap-node-x (cadr (canvas-diagram-nodes diagram))) 0))))))
+  ;; GIVEN a map buffer whose branch "A" has just been folded
+  ;; WHEN the diagram is laid out again through the callback
+  ;; THEN the nodes are the shown ones, parents before children, AND the
+  ;;      layout marks the branch as folded
+  (canvas-mindmap-test--in-map-buffer '("R" ("A" ("A1")) ("B")) '(600 . 300)
+    (canvas-diagram-set-fold '("R" "A") 'folded)
+    (let ((nodes (canvas-mindmap--lay-out canvas-diagram--diagram canvas-diagram--context)))
+      (should (equal (mapcar #'canvas-mindmap-node-label nodes) '("R" "A" "B")))
+      (should (> (canvas-mindmap-node-x (cadr nodes)) 0))
+      (should (canvas-mindmap-node-collapsed (cadr nodes))))))
 
 ;;;; Colours and the legend
 
@@ -757,7 +773,7 @@
   (canvas-mindmap-test--in-map-buffer '("Root" ("A")) '(300 . 200)
     (let* ((canvas-diagram-colors (append '(:selection "yellow") canvas-diagram-colors))
            (a (canvas-mindmap-test--labelled "A"))
-           (root (canvas-mindmap--root))
+           (root (canvas-diagram-current-model))
            (y (+ 10 (floor (canvas-diagram-middle-y a)))))
       (canvas-diagram--select a)
       (should (= (canvas-cairo-pixel canvas-diagram--context
@@ -788,7 +804,7 @@
   ;;      root, the keyboard is on it, AND the header line reads the path
   (canvas-mindmap-test--in-map-buffer '("R" ("A" ("A1")) ("B")) '(300 . 200)
     (should (derived-mode-p 'canvas-diagram-mode))
-    (should (canvas-mindmap-node-p (canvas-mindmap--root)))
+    (should (canvas-mindmap-node-p (canvas-diagram-current-model)))
     (should (equal (canvas-mindmap-test--selected) "R"))
     (canvas-diagram--select (canvas-mindmap-test--labelled "A1"))
     (should (equal (canvas-diagram--header) "R › A › A1"))))
@@ -893,29 +909,7 @@
       (canvas-mindmap-cycle-direction)
       (should (eq canvas-mindmap-direction 'left))
       (should (eq (canvas-diagram-selected) a))
-      (should (< (canvas-mindmap-node-x a) (canvas-mindmap-node-x (canvas-mindmap--root)))))))
-
-(ert-deftest canvas-mindmap-levels-step-down-and-up-keeping-the-keyboard-near ()
-  ;; GIVEN a map three levels deep with the keyboard on a grandchild
-  ;; WHEN the levels are stepped down twice, then up twice
-  ;; THEN the map shows two levels, then one with the keyboard moved up to
-  ;;      the branch, then two, then all again
-  (canvas-mindmap-test--in-map-buffer '("R" ("A" ("A1" ("A11"))) ("B")) '(600 . 300)
-    (canvas-diagram--select (canvas-mindmap-test--labelled "A1"))
-    (canvas-mindmap-shallower)
-    (should (= canvas-mindmap-depth 2))
-    (should (equal (canvas-mindmap-test--selected) "A1"))
-    (canvas-mindmap-shallower)
-    (should (= canvas-mindmap-depth 1))
-    (should (equal (canvas-mindmap-test--selected) "A"))
-    (should (equal (canvas-mindmap--node-text (canvas-diagram-selected)) "A +1"))
-    (canvas-mindmap-shallower)
-    (should (= canvas-mindmap-depth 1))
-    (canvas-mindmap-deeper)
-    (should (= canvas-mindmap-depth 2))
-    (canvas-mindmap-deeper)
-    (should-not canvas-mindmap-depth)
-    (should (= (length (canvas-diagram-nodes-shown)) 5))))
+      (should (< (canvas-mindmap-node-x a) (canvas-mindmap-node-x (canvas-diagram-current-model)))))))
 
 (ert-deftest canvas-mindmap-map-follows-its-org-buffer ()
   ;; GIVEN a map of an org buffer that follows it
@@ -1046,186 +1040,128 @@
 
 ;;;; Folding
 
-(ert-deftest canvas-mindmap-folding-a-node-hides-its-subtree ()
-  ;; GIVEN a map with a branch that has two children
-  ;; WHEN that branch is folded
-  ;; THEN its children leave the layout, the walk and the hot spots, the box
-  ;;      says how many it hides, AND the next node down is the other branch
-  ;; WHEN it is unfolded
-  ;; THEN they are back
+;; The fold commands, their keys and the fold rule are canvas-diagram's,
+;; tested there.  These tests cover how a mind map takes part.
+
+(ert-deftest canvas-mindmap-depth-sets-the-levels-a-map-opens-with ()
+  ;; GIVEN a spec three levels deep
+  ;; WHEN it is shown with a depth of one, and then with no depth
+  ;; THEN the root and its branches show, a branch says how many children it
+  ;;      hides, one level more shows all, AND with no depth all shows at once
+  (let ((spec '("R" ("A" ("A1") ("A2")) ("B"))))
+    (canvas-mindmap-test--in-map-buffer-at-depth 1 spec '(600 . 300)
+      (let ((a (canvas-mindmap-test--labelled "A")))
+        (should (equal (canvas-mindmap-test--shown-labels) '("R" "A" "B")))
+        (should (= (canvas-mindmap--hidden a) 2))
+        (should (equal (canvas-mindmap--node-text a) "A +2"))
+        (should (equal (canvas-mindmap--node-text (canvas-diagram-current-model)) "R"))
+        (canvas-diagram-deeper)
+        (should (equal (canvas-mindmap-test--shown-labels) '("R" "A" "A1" "A2" "B")))
+        (should (equal (canvas-mindmap--node-text a) "A"))))
+    (canvas-mindmap-test--in-map-buffer-at-depth nil spec '(600 . 300)
+      (should (equal (canvas-mindmap-test--shown-labels) '("R" "A" "A1" "A2" "B"))))))
+
+(ert-deftest canvas-mindmap-tab-folds-the-node-at-the-keyboard ()
+  ;; GIVEN a map buffer with the keyboard on a branch that has two children
+  ;; WHEN TAB is pressed, and then c
+  ;; THEN both keys run the fold command of canvas-diagram, TAB takes the
+  ;;      children out of the layout, the hot spots and the walk, the box
+  ;;      says how many it hides, AND c brings them back
   (canvas-mindmap-test--in-map-buffer '("R" ("A" ("A1") ("A2")) ("B")) '(600 . 300)
     (let ((a (canvas-mindmap-test--labelled "A"))
-          (wide (car (canvas-mindmap--bounds (canvas-mindmap--root)))))
+          (wide (car (canvas-mindmap--bounds (canvas-diagram-current-model)))))
+      (should (eq (key-binding (kbd "TAB")) #'canvas-diagram-toggle-fold))
+      (should (eq (key-binding (kbd "c")) #'canvas-diagram-toggle-fold))
       (canvas-diagram--select a)
-      (canvas-mindmap-toggle-collapse)
+      (call-interactively (key-binding (kbd "TAB")))
       (should (canvas-mindmap-node-collapsed a))
-      (should (equal (mapcar #'canvas-mindmap-node-label (canvas-diagram-nodes-shown))
-                     '("R" "A" "B")))
-      (should (< (car (canvas-mindmap--bounds (canvas-mindmap--root))) wide))
+      (should (equal (canvas-mindmap-test--shown-labels) '("R" "A" "B")))
+      (should (< (car (canvas-mindmap--bounds (canvas-diagram-current-model))) wide))
       (should (equal (canvas-mindmap--node-text a) "A +2"))
       (should (= (length (canvas-diagram--hot-spots (canvas-diagram-nodes-shown) '(0 . 0))) 3))
       (canvas-diagram-move-next)
       (should (equal (canvas-mindmap-test--selected) "B"))
       (canvas-diagram--select a)
-      (canvas-mindmap-toggle-collapse)
+      (call-interactively (key-binding (kbd "c")))
       (should-not (canvas-mindmap-node-collapsed a))
       (should (= (length (canvas-diagram-nodes-shown)) 5))
-      (should (= (car (canvas-mindmap--bounds (canvas-mindmap--root))) wide)))))
+      (should (= (car (canvas-mindmap--bounds (canvas-diagram-current-model))) wide)))))
 
 (ert-deftest canvas-mindmap-going-into-a-folded-node-unfolds-it ()
-  ;; GIVEN the keyboard on a folded branch
-  ;; WHEN it moves forward into a child
-  ;; THEN the branch unfolds and the keyboard lands on a child
-  (canvas-mindmap-test--in-map-buffer '("R" ("A" ("A1") ("A2")) ("B")) '(600 . 300)
+  ;; GIVEN a map opened at a depth of one, the keyboard on a folded branch
+  ;; WHEN the keyboard moves forward into a child
+  ;; THEN the fold of the branch is open, over the levels, the branch shows
+  ;;      its children, AND the keyboard lands on one of them
+  (canvas-mindmap-test--in-map-buffer-at-depth 1 '("R" ("A" ("A1") ("A2")) ("B")) '(600 . 300)
     (let ((a (canvas-mindmap-test--labelled "A")))
       (canvas-diagram--select a)
-      (canvas-mindmap-toggle-collapse)
       (canvas-diagram-move-in)
+      (should-not (canvas-diagram-folded-p '("R" "A") 1))
       (should-not (canvas-mindmap-node-collapsed a))
+      (should (equal (canvas-mindmap-test--shown-labels) '("R" "A" "A1" "A2" "B")))
       (should (member (canvas-mindmap-test--selected) '("A1" "A2"))))))
 
-(ert-deftest canvas-mindmap-folds-outlive-a-rebuild-and-beat-the-level-limit ()
-  ;; GIVEN a branch folded by hand, and another unfolded by hand while the
-  ;;       level limit would fold it
-  ;; WHEN the tree is built again, as after a re-read of the source
-  ;; THEN the hand-folded branch is still folded AND the hand-unfolded one
-  ;;      is open despite the limit
-  (canvas-mindmap-test--in-map-buffer '("R" ("A" ("A1")) ("B" ("B1"))) '(600 . 300)
+(ert-deftest canvas-mindmap-a-filter-keeps-the-folds ()
+  ;; GIVEN a map with the branch "A" folded
+  ;; WHEN a kind is hidden, and then every kind shows again
+  ;; THEN "A" stays folded through both rebuilds
+  (canvas-mindmap-test--in-map-buffer '("R" ("A" ("A1")) ("B" ("B1" :kind "risk")) ("C")) '(600 . 300)
     (canvas-diagram--select (canvas-mindmap-test--labelled "A"))
-    (canvas-mindmap-toggle-collapse)
-    (canvas-diagram-rebuild)
-    (should (canvas-mindmap-node-collapsed (canvas-mindmap-test--labelled "A")))
-    (should-not (canvas-mindmap-node-collapsed (canvas-mindmap-test--labelled "B")))
-    (let ((canvas-mindmap-depth 1))
-      (canvas-diagram-rebuild)
-      (should (canvas-mindmap-node-collapsed (canvas-mindmap-test--labelled "B")))
-      (canvas-diagram--select (canvas-mindmap-test--labelled "B"))
-      (canvas-mindmap-toggle-collapse)
-      (canvas-diagram-rebuild)
-      (should-not (canvas-mindmap-node-collapsed (canvas-mindmap-test--labelled "B")))
-      (should (canvas-mindmap-node-collapsed (canvas-mindmap-test--labelled "A"))))))
+    (canvas-diagram-toggle-fold)
+    (canvas-mindmap-toggle-kind "risk")
+    (should (equal (canvas-mindmap-test--shown-labels) '("R" "A" "B" "C")))
+    (canvas-mindmap-show-all-kinds)
+    (should (equal (canvas-mindmap-test--shown-labels) '("R" "A" "B" "B1" "C")))))
 
 (ert-deftest canvas-mindmap-rebuild-keeps-the-keyboard-on-its-path ()
   ;; GIVEN the keyboard on a grandchild
-  ;; WHEN the tree is rebuilt with that grandchild gone, then folded away
+  ;; WHEN the tree is rebuilt with that grandchild gone, then with its
+  ;;      parent folded
   ;; THEN the keyboard lands on the nearest node found on the way, then on
-  ;;      the folded ancestor
+  ;;      the folded parent
   (canvas-mindmap-test--in-map-buffer '("R" ("A" ("A1")) ("B")) '(600 . 300)
     (canvas-diagram--select (canvas-mindmap-test--labelled "A1"))
     (setf (canvas-diagram-spec canvas-diagram--diagram) '("R" ("A" ("A2")) ("B")))
     (canvas-diagram-rebuild)
     (should (equal (canvas-mindmap-test--selected) "A"))
     (canvas-diagram--select (canvas-mindmap-test--labelled "A2"))
-    (let ((canvas-mindmap-depth 1))
-      (canvas-diagram-rebuild)
-      (should (equal (canvas-mindmap-test--selected) "A")))))
-
-(ert-deftest canvas-mindmap-folding-above-the-keyboard-moves-it-up ()
-  ;; GIVEN the keyboard on a grandchild
-  ;; WHEN its grandparent branch is folded from the mouse
-  ;; THEN the keyboard is on that branch, the nearest node still shown
-  (canvas-mindmap-test--in-map-buffer '("R" ("A" ("A1" ("A11"))) ("B")) '(600 . 300)
-    (canvas-diagram--select (canvas-mindmap-test--labelled "A11"))
-    (canvas-mindmap-toggle-collapse (canvas-mindmap-test--labelled "A"))
+    (canvas-diagram-set-fold '("R" "A") 'folded)
+    (canvas-diagram-rebuild)
     (should (equal (canvas-mindmap-test--selected) "A"))))
 
-(ert-deftest canvas-mindmap-a-leaf-cannot-be-folded ()
-  ;; GIVEN the keyboard on a leaf
-  ;; WHEN it is folded
-  ;; THEN nothing changes and the user is told
-  (canvas-mindmap-test--in-map-buffer '("R" ("A")) '(300 . 200)
-    (canvas-diagram--select (canvas-mindmap-test--labelled "A"))
-    (canvas-mindmap-toggle-collapse)
-    (should-not (canvas-mindmap-node-collapsed (canvas-mindmap-test--labelled "A")))
-    (should-not canvas-mindmap--folds)))
+(ert-deftest canvas-mindmap-siblings-of-one-label-fold-on-their-own ()
+  ;; GIVEN a map whose branch "A" has two children labelled "x"
+  ;; WHEN the map opens, TAB folds the second "x", the map is rebuilt, and
+  ;;      the keyboard moves into the second "x"
+  ;; THEN the map shows both, TAB hides the child of the second alone, the
+  ;;      rebuild keeps the keyboard on the second, AND the move unfolds the
+  ;;      second alone
+  (canvas-mindmap-test--in-map-buffer '("R" ("A" ("x" ("x1")) ("x" ("x2"))) ("B")) '(600 . 300)
+    (cl-flet ((second-x () (cadr (canvas-mindmap-node-children (canvas-mindmap-test--labelled "A")))))
+      (should (equal (canvas-mindmap-test--shown-labels) '("R" "A" "x" "x1" "x" "x2" "B")))
+      (canvas-diagram--select (second-x))
+      (call-interactively (key-binding (kbd "TAB")))
+      (should (equal (canvas-mindmap-test--shown-labels) '("R" "A" "x" "x1" "x" "B")))
+      (canvas-diagram-rebuild)
+      (should (eq (canvas-diagram-selected) (second-x)))
+      (should (equal (canvas-mindmap-test--shown-labels) '("R" "A" "x" "x1" "x" "B")))
+      (canvas-diagram-move-in)
+      (should (equal (canvas-mindmap-test--selected) "x2"))
+      (should (equal (canvas-mindmap-test--shown-labels) '("R" "A" "x" "x1" "x" "x2" "B"))))))
 
-(ert-deftest canvas-mindmap-cycle-node-goes-folded-children-everything ()
-  ;; GIVEN the keyboard on a branch with a grandchild and a great-grandchild
-  ;; WHEN the node is cycled four times
-  ;; THEN it goes folded, then open with its children folded, then open
-  ;;      all the way down, then folded again
-  (canvas-mindmap-test--in-map-buffer '("R" ("A" ("A1" ("A11")) ("A2")) ("B")) '(600 . 300)
-    (let ((a (canvas-mindmap-test--labelled "A"))
-          (a1 (canvas-mindmap-test--labelled "A1")))
-      (canvas-diagram--select a)
-      (canvas-mindmap-cycle-node)
-      (should (canvas-mindmap-node-collapsed a))
-      (canvas-mindmap-cycle-node)
-      (should-not (canvas-mindmap-node-collapsed a))
-      (should (canvas-mindmap-node-collapsed a1))
-      (should (= (length (canvas-diagram-nodes-shown)) 5))
-      (canvas-mindmap-cycle-node)
-      (should-not (canvas-mindmap-node-collapsed a1))
-      (should (= (length (canvas-diagram-nodes-shown)) 6))
-      (canvas-mindmap-cycle-node)
-      (should (canvas-mindmap-node-collapsed a)))))
-
-(ert-deftest canvas-mindmap-cycle-global-walks-the-levels ()
-  ;; GIVEN a three-level map shown in full
-  ;; WHEN the whole map is cycled three times
-  ;; THEN it shows one level, then two, then all again
-  (canvas-mindmap-test--in-map-buffer '("R" ("A" ("A1" ("A11")))) '(600 . 300)
-    (let ((canvas-mindmap-depth nil))
-      (canvas-mindmap-cycle-global)
-      (should (= canvas-mindmap-depth 1))
-      (should (= (length (canvas-diagram-nodes-shown)) 2))
-      (canvas-mindmap-cycle-global)
-      (should (= canvas-mindmap-depth 2))
-      (should (= (length (canvas-diagram-nodes-shown)) 3))
-      (canvas-mindmap-cycle-global)
-      (should-not canvas-mindmap-depth)
-      (should (= (length (canvas-diagram-nodes-shown)) 4)))))
-
-(ert-deftest canvas-mindmap-digits-show-levels-of-the-node ()
-  ;; GIVEN the keyboard on a branch four levels deep
-  ;; WHEN 2, 3, 1 and 4 are pressed in turn
-  ;; THEN two levels show, then three, then the branch alone, then all
-  (canvas-mindmap-test--in-map-buffer '("R" ("A" ("A1" ("A11" ("A111")))) ("B")) '(600 . 300)
-    (let ((a (canvas-mindmap-test--labelled "A"))
-          (a1 (canvas-mindmap-test--labelled "A1"))
-          (a11 (canvas-mindmap-test--labelled "A11")))
-      (canvas-diagram--select a)
-      (canvas-mindmap-show-level-2)
-      (should-not (canvas-mindmap-node-collapsed a))
-      (should (canvas-mindmap-node-collapsed a1))
-      (canvas-mindmap-show-level-3)
-      (should-not (canvas-mindmap-node-collapsed a1))
-      (should (canvas-mindmap-node-collapsed a11))
-      (canvas-mindmap-show-level-1)
-      (should (canvas-mindmap-node-collapsed a))
-      (should (equal (canvas-mindmap-test--selected) "A"))
-      (canvas-mindmap-show-level-4)
-      (should-not (canvas-mindmap-node-collapsed a11))
-      (should (= (length (canvas-diagram-nodes-shown)) 6)))))
-
-(ert-deftest canvas-mindmap-meta-digits-show-levels-of-the-map ()
-  ;; GIVEN a map with a branch folded by hand
-  ;; WHEN M-2 asks for two levels of the whole map
-  ;; THEN the root and its branches show, the branches folded, the hand
-  ;;      fold forgotten
-  ;; WHEN M-4 asks for four
-  ;; THEN everything shows
-  (canvas-mindmap-test--in-map-buffer '("R" ("A" ("A1" ("A11"))) ("B" ("B1"))) '(600 . 300)
-    (let ((canvas-mindmap-depth nil))
-      (canvas-diagram--select (canvas-mindmap-test--labelled "B"))
-      (canvas-mindmap-toggle-collapse)
-      (canvas-mindmap-show-all-level-2)
-      (should (= canvas-mindmap-depth 1))
-      (should-not canvas-mindmap--folds)
-      (should (equal (mapcar #'canvas-mindmap-node-label (canvas-diagram-nodes-shown))
-                     '("R" "A" "B")))
-      (canvas-mindmap-show-all-level-4)
-      (should (= (length (canvas-diagram-nodes-shown)) 6)))))
-
-(ert-deftest canvas-mindmap-double-click-folds-the-box ()
-  ;; GIVEN a map buffer
-  ;; WHEN a double click lands on a branch through the diagram
-  ;; THEN the branch folds
+(ert-deftest canvas-mindmap-double-click-toggles-the-fold-of-the-box ()
+  ;; GIVEN a map buffer with the keyboard on the root
+  ;; WHEN a double click lands on a branch through the diagram, and then again
+  ;; THEN the branch folds with the keyboard on it, AND the second click
+  ;;      unfolds it
   (canvas-mindmap-test--in-map-buffer '("R" ("A" ("A1")) ("B")) '(600 . 300)
     (let ((a (canvas-mindmap-test--labelled "A")))
       (cl-letf (((symbol-function 'posn-object-x-y) (lambda (_) (canvas-mindmap-test--inside a))))
-        (canvas-diagram-double-click '(double-mouse-1 (nil))))
-      (should (canvas-mindmap-node-collapsed a)))))
+        (canvas-diagram-double-click '(double-mouse-1 (nil)))
+        (should (canvas-mindmap-node-collapsed a))
+        (should (equal (canvas-mindmap-test--selected) "A"))
+        (canvas-diagram-double-click '(double-mouse-1 (nil)))
+        (should-not (canvas-mindmap-node-collapsed a))))))
 
 ;;;; Filtering by kind
 
@@ -1368,19 +1304,16 @@
 
 ;;;; Keys and the menu
 
-(ert-deftest canvas-mindmap-keys-fold-and-show-levels-as-magit-does ()
+(ert-deftest canvas-mindmap-keys-are-the-diagram-s-fold-keys-included ()
   ;; GIVEN the mode map
-  ;; THEN TAB and c fold the keyboard's node, C-TAB cycles it, S-TAB cycles
-  ;;      the map, the digits show levels of the node and the meta digits of
-  ;;      the map, AND the diagram's keys are inherited
-  (let ((map canvas-mindmap-mode-map))
-    (should (eq (lookup-key map (kbd "TAB")) #'canvas-mindmap-toggle-collapse))
-    (should (eq (lookup-key map (kbd "C-<tab>")) #'canvas-mindmap-cycle-node))
-    (should (eq (lookup-key map (kbd "<backtab>")) #'canvas-mindmap-cycle-global))
-    (should (eq (lookup-key map (kbd "c")) #'canvas-mindmap-toggle-collapse))
-    (should (eq (lookup-key map (kbd "1")) #'canvas-mindmap-show-level-1))
-    (should (eq (lookup-key map (kbd "4")) #'canvas-mindmap-show-level-4))
-    (should (eq (lookup-key map (kbd "M-2")) #'canvas-mindmap-show-all-level-2))
+  ;; WHEN its keys are looked up
+  ;; THEN the diagram's keys are inherited, AND no key of its own hides a
+  ;;      fold key of the diagram
+  (let ((map canvas-mindmap-mode-map)
+        (own (copy-keymap canvas-mindmap-mode-map)))
+    (set-keymap-parent own nil)
+    (pcase-dolist (`(,key . ,_) canvas-diagram--fold-keys)
+      (should-not (lookup-key own (kbd key))))
     (should (eq (lookup-key map (kbd "^")) #'canvas-diagram-move-out))
     (should (eq (lookup-key map (kbd "n")) #'canvas-diagram-move-next))
     (should (eq (lookup-key map (kbd "C-<return>")) #'canvas-diagram-visit-source))
@@ -1389,17 +1322,20 @@
 
 (ert-deftest canvas-mindmap-menu-has-the-layout-group-and-the-shared-ones ()
   ;; GIVEN the menu and the mode map
-  ;; THEN its own keys, direction, edges and levels, are on it and in the
-  ;;      buffer, the shared zoom and looks follow, AND it is the diagram's menu
+  ;; WHEN their keys are looked up
+  ;; THEN its own keys, direction and edges, are on it and in the buffer,
+  ;;      the shared folds, zoom and looks follow, AND it is the diagram's menu
   (pcase-dolist (`(,key . ,command) canvas-mindmap--setting-keys)
     (let ((suffix (transient-get-suffix 'canvas-mindmap-menu key)))
       (should suffix)
       (should (eq (plist-get (cdr suffix) :command) command))
       (should (eq (lookup-key canvas-mindmap-mode-map (kbd key)) command))))
+  (pcase-dolist (`(,key . ,command) '(("[" . canvas-diagram-shallower) ("]" . canvas-diagram-deeper)))
+    (should (eq (plist-get (cdr (transient-get-suffix 'canvas-mindmap-menu key)) :command) command)))
   (should (transient-get-suffix 'canvas-mindmap-menu "+"))
   (should (transient-get-suffix 'canvas-mindmap-menu "B"))
   (should (transient-get-suffix 'canvas-mindmap-menu "i"))
-  (should (eq (lookup-key canvas-mindmap-mode-map (kbd "SPC")) #'canvas-diagram-menu))
+  (should (eq (lookup-key canvas-mindmap-mode-map (kbd "SPC")) #'canvas-keys-menu))
   (should (eq (plist-get canvas-mindmap--callbacks :menu) 'canvas-mindmap-menu)))
 
 ;;;; Files

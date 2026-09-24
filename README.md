@@ -126,19 +126,23 @@ buffer: the heading line and the lines up to the next heading, or for a
 list item, its line and the lines indented below it. The menu's Copy
 group, `y`, and embark copy the header or the body alone.
 
-Folding works as in magit: `TAB` folds the selected node, hiding its
-children behind a count on its box, or unfolds it; `C-TAB` cycles it
-through folded, its children with their own folded, and everything
-below; `S-TAB` cycles the whole map through its levels; `1` to `4`
-show that many levels of the selected node and `M-1` to `M-4` of the
-whole map. `c` and a double click on a box fold too, and going into a
-folded node with `f` unfolds it. Your folds survive re-reads of the
-source and changes of the level limit.
+Folding works as in magit. The fold keys come from canvas-diagram, and
+they work the same in every diagram that folds. `TAB` folds the
+selected node or unfolds it. A folded node hides its children, and its
+box shows how many it hides. Two sibling nodes with the same label fold
+separately. `C-TAB` cycles the node from folded, to
+open with its children folded, to open all the way down. `S-TAB`
+cycles the whole map through its levels. `1` to `4` show that many
+levels of the selected node, and `M-1` to `M-4` show that many levels
+of the whole map. `[` shows one level fewer, and `]` shows one level
+more. The level keys also drop the folds that you set by hand. `c` and
+a double click on a box also fold or unfold the node. When you go into
+a folded node with `f`, the node unfolds. Your folds stay after the map
+reads its source again, and after you hide or show kinds and statuses.
 
 The menu's own groups are the layout, the kinds and the statuses. `d` sends the
-branches right, left or to both sides of the root, `e` draws the edges
-as curves, straight lines or elbows, `[` and `]` show fewer or more
-levels, folding everything below. The Kinds group is made when the
+branches right, left or to both sides of the root, and `e` draws the
+edges as curves, straight lines or elbows. The Kinds group is made when the
 menu opens: one entry per kind in the map, `K f` for functions say,
 each saying whether it shows and how many nodes it has; pressing one
 leaves that kind out of the map, or takes it back, while the menu stays
@@ -149,13 +153,14 @@ Statuses group works the same way under `S`, with an entry for each
 todo keyword in the map: `S d` leaves out the DONE nodes, and `S S`
 shows every status again. A hidden node stays as the way to a shown one
 below it. The shared groups
-follow, zoom, boxes, spacing, font, palette, kinds, legend, icons and
+follow, folds, zoom, boxes, spacing, font, palette, kinds, legend, icons and
 paper; the single keys work in the map directly as well.
 
 ## Settings
 
 `canvas-mindmap-gap-x` and `-gap-y` space the tree, scaled by the
-shared spacing; `canvas-mindmap-depth` limits the levels;
+shared spacing; `canvas-mindmap-depth` sets the number of levels below
+the root that a new map shows;
 `canvas-mindmap-direction` and `-edge-style` are what the menu cycles;
 `canvas-mindmap-branch-colors` names the branch colours, or nil takes
 them from the palette in use. Font, colours, padding, box shape, kinds

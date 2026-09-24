@@ -62,8 +62,9 @@ nil takes them from the `canvas-diagram-palette' in use."
   :type 'integer)
 
 (defcustom canvas-mindmap-depth nil
-  "How many levels below the root to show; nil shows them all.
-A node whose children are folded away says how many with a + count."
+  "How many levels below the root a map shows when it opens.
+nil shows them all.  The fold keys change the levels after that.  A
+node whose children are folded away says how many with a + count."
   :type '(choice (const nil) integer))
 
 (defcustom canvas-mindmap-direction 'right
@@ -173,16 +174,6 @@ Return ROOT."
                  (cons (canvas-mindmap-node-label root) path)))
              (canvas-mindmap-node-children root))))
 
-(defun canvas-mindmap--prune (node depth)
-  "Collapse the nodes DEPTH levels below NODE; nil collapses none.
-Return NODE."
-  (let ((children (canvas-mindmap-node-children node)))
-    (if (and depth (<= depth 0))
-        (setf (canvas-mindmap-node-collapsed node) (and children t))
-      (dolist (child children)
-        (canvas-mindmap--prune child (and depth (1- depth))))))
-  node)
-
 (defun canvas-mindmap--status-rgb (node)
   "The colour of NODE's status badge: its keyword's in
 `canvas-mindmap-statuses', else the open or the done colour.  A name
@@ -205,23 +196,49 @@ that is no colour is an error."
       (canvas-mindmap-node-label node)
     (format "%s +%d" (canvas-mindmap-node-label node) (canvas-mindmap--hidden node))))
 
-(defun canvas-mindmap--spec-depth (spec)
-  "How many levels SPEC, a nested list, has below its root."
-  (let ((children (cdr (canvas-mindmap--options (cdr spec)))))
-    (if children
-        (1+ (apply #'max (mapcar #'canvas-mindmap--spec-depth children)))
-      0)))
+(defun canvas-mindmap--child-segments (node)
+  "The key segments of NODE's children, in their order.
+A segment is the child's label, or (LABEL . N) when the child is the
+Nth child of NODE with that label, N being 2 or more."
+  (let ((seen (make-hash-table :test #'equal)))
+    (mapcar (lambda (child)
+              (let* ((label (canvas-mindmap-node-label child))
+                     (n (puthash label (1+ (gethash label seen 0)) seen)))
+                (if (= n 1) label (cons label n))))
+            (canvas-mindmap-node-children node))))
 
-(defun canvas-mindmap--node-by-path (root labels &optional exact)
-  "The node LABELS lead to from ROOT, or the last one found on the way.
-With EXACT, nil unless the whole path is found."
+(defun canvas-mindmap--segment (parent child)
+  "The key segment of CHILD, a child of PARENT."
+  (nth (or (cl-position child (canvas-mindmap-node-children parent))
+           (error "canvas-mindmap: %s is not a child of %s"
+                  (canvas-mindmap-node-label child) (canvas-mindmap-node-label parent)))
+       (canvas-mindmap--child-segments parent)))
+
+(defun canvas-mindmap--key (root node)
+  "The key of NODE in the tree of ROOT, which names NODE across rebuilds.
+The key is the list of key segments from ROOT down to NODE, ROOT's
+being its label.  Without siblings of one label, it is the label path.
+See `canvas-mindmap--child-segments'.  A NODE outside the tree is an error."
+  (let ((ancestry (or (canvas-mindmap--ancestry root node)
+                      (error "canvas-mindmap: %s is not in this map" (canvas-mindmap-node-label node)))))
+    (cons (canvas-mindmap-node-label root)
+          (cl-mapcar #'canvas-mindmap--segment ancestry (cdr ancestry)))))
+
+(defun canvas-mindmap--child-keys (node key)
+  "The children of NODE, whose key is KEY, each with its own key.
+Return ((CHILD . CHILD-KEY)...), in the order of the children."
+  (cl-mapcar (lambda (child segment) (cons child (append key (list segment))))
+             (canvas-mindmap-node-children node)
+             (canvas-mindmap--child-segments node)))
+
+(defun canvas-mindmap--node-by-key (root key)
+  "The node KEY leads to from ROOT, or the last one found on the way."
   (let ((node root) (found t))
-    (dolist (label (cdr labels))
+    (dolist (segment (cdr key))
       (when found
-        (let ((child (cl-find label (canvas-mindmap-node-children node)
-                              :key #'canvas-mindmap-node-label :test #'equal)))
-          (if child (setq node child) (setq found nil)))))
-    (if (and exact (not found)) nil node)))
+        (let ((i (cl-position segment (canvas-mindmap--child-segments node) :test #'equal)))
+          (if i (setq node (nth i (canvas-mindmap-node-children node))) (setq found nil)))))
+    node))
 
 (defun canvas-mindmap--ancestry (root node)
   "The nodes from ROOT down to NODE, or nil when NODE is not below ROOT."
@@ -890,13 +907,11 @@ markdown outline of it; nil when another source read it."
 
 (defun canvas-mindmap--tree-of (source)
   "Node tree of SOURCE, a nested spec or the name of an org file.
-Its branches are numbered and it is folded at `canvas-mindmap-depth'."
-  (canvas-mindmap--prune
-   (canvas-mindmap--number-branches
-    (canvas-mindmap--tree (if (stringp source)
-                              (canvas-mindmap--file-tree source)
-                            source)))
-   canvas-mindmap-depth))
+Its branches are numbered.  The layout folds it."
+  (canvas-mindmap--number-branches
+   (canvas-mindmap--tree (if (stringp source)
+                             (canvas-mindmap--file-tree source)
+                           source))))
 
 ;;;; The layout
 
@@ -1080,148 +1095,56 @@ are several; the kinds are the diagram's business."
 
 ;;;; Folding
 
-(defvar-local canvas-mindmap--folds nil
-  "Alist of label paths to `collapsed' or `expanded': the user's own
-folds, applied again whenever the tree is built, over the level limit.")
+;; The folds, the rule that reads them, the fold commands and their keys
+;; are canvas-diagram's.  A map gives its tree as fold trees under the
+;; keys of its nodes, and the layout folds each node as the rule says.
 
 (defun canvas-mindmap--shown-node (root node)
   "NODE if it is shown, else the folded ancestor that hides it."
   (or (cl-find-if #'canvas-mindmap-node-collapsed (butlast (canvas-mindmap--ancestry root node)))
       node))
 
-(defun canvas-mindmap--apply-folds (root)
-  "Collapse or expand the nodes of ROOT the user has folded by hand."
-  (pcase-dolist (`(,path . ,fold) canvas-mindmap--folds)
-    (when-let* ((node (canvas-mindmap--node-by-path root path t)))
-      (setf (canvas-mindmap-node-collapsed node)
-            (and (eq fold 'collapsed) (canvas-mindmap-node-children node) t))))
-  root)
+(defun canvas-mindmap--fold-tree (node key)
+  "The fold tree of NODE, whose key is KEY: (KEY . CHILD-TREES).
+It holds the folded nodes too."
+  (cons key (canvas-mindmap--child-fold-trees node key)))
 
-(defun canvas-mindmap--root ()
-  "The root of the tree this buffer shows."
-  (canvas-diagram-current-model))
+(defun canvas-mindmap--child-fold-trees (node key)
+  "The fold trees of the children of NODE, whose key is KEY."
+  (mapcar (lambda (child) (canvas-mindmap--fold-tree (car child) (cdr child)))
+          (canvas-mindmap--child-keys node key)))
 
-(defun canvas-mindmap--set-fold (node how)
-  "Collapse or expand NODE, HOW being `collapsed' or `expanded', and
-remember that as the user's choice for its path."
-  (when (canvas-mindmap-node-children node)
-    (setf (canvas-mindmap-node-collapsed node) (eq how 'collapsed))
-    (setf (alist-get (canvas-mindmap--path (canvas-mindmap--root) node) canvas-mindmap--folds
-                     nil nil #'equal)
-          how)))
+(defun canvas-mindmap--fold-trees (diagram node)
+  "The fold trees under NODE in DIAGRAM's tree, or the root's own for nil.
+Each tree is under the key `canvas-mindmap--key' gives its node."
+  (let ((root (canvas-diagram-model diagram)))
+    (if (null node)
+        (list (canvas-mindmap--fold-tree root (canvas-mindmap--key root root)))
+      (canvas-mindmap--child-fold-trees node (canvas-mindmap--key root node)))))
 
-(defun canvas-mindmap--fold (node how)
-  "Fold NODE as `canvas-mindmap--set-fold' does, then lay out again with
-the keyboard on the nearest node still shown."
-  (canvas-mindmap--set-fold node how)
-  (canvas-diagram-set-selected
-   (canvas-mindmap--shown-node (canvas-mindmap--root) (canvas-diagram-selected)))
+(defun canvas-mindmap--fold-start (_diagram)
+  "The levels a map opens with: those `canvas-mindmap-depth' gives."
+  (list :levels (and canvas-mindmap-depth (1+ canvas-mindmap-depth))))
+
+(defun canvas-mindmap--fold-by-rule (node key)
+  "Fold NODE, whose key is KEY, and every node below it.
+The fold rule of canvas-diagram says which nodes hide their children."
+  (setf (canvas-mindmap-node-collapsed node)
+        (and (canvas-mindmap-node-children node)
+             (canvas-diagram-folded-p key (1- (length key)))
+             t))
+  (pcase-dolist (`(,child . ,child-key) (canvas-mindmap--child-keys node key))
+    (canvas-mindmap--fold-by-rule child child-key)))
+
+(defun canvas-mindmap--unfold (diagram node)
+  "Open the fold of NODE in DIAGRAM's tree, and lay the map out again."
+  (canvas-diagram-set-fold (canvas-mindmap--key (canvas-diagram-model diagram) node) 'open)
   (canvas-diagram-relayout))
 
-(defun canvas-mindmap--fold-below (node how)
-  "Fold every node below NODE, not NODE itself, as HOW says."
-  (dolist (child (canvas-mindmap-node-children node))
-    (canvas-mindmap--set-fold child how)
-    (canvas-mindmap--fold-below child how)))
-
-(defun canvas-mindmap--children-folded-p (node)
-  "Whether every child of NODE that has children of its own is folded."
-  (cl-every (lambda (child) (or (null (canvas-mindmap-node-children child))
-                                (canvas-mindmap-node-collapsed child)))
-            (canvas-mindmap-node-children node)))
-
-(defun canvas-mindmap-toggle-collapse (&optional node)
-  "Fold the keyboard's node, or NODE, hiding its children; or unfold it."
-  (interactive)
-  (let ((node (or node (canvas-diagram-selected))))
-    (cond ((null (canvas-mindmap-node-children node))
-           (message "canvas-mindmap: %s has nothing to fold" (canvas-mindmap-node-label node)))
-          ((canvas-mindmap-node-collapsed node) (canvas-mindmap--fold node 'expanded))
-          (t (canvas-mindmap--fold node 'collapsed)))))
-
-(defun canvas-mindmap-cycle-node ()
-  "Cycle the keyboard's node as magit cycles a section: folded, then
-its children with their own children folded, then everything below."
-  (interactive)
-  (let ((node (canvas-diagram-selected)))
-    (cond ((null (canvas-mindmap-node-children node))
-           (message "canvas-mindmap: %s has nothing to fold" (canvas-mindmap-node-label node)))
-          ((canvas-mindmap-node-collapsed node)
-           (canvas-mindmap--fold-below node 'collapsed)
-           (canvas-mindmap--fold node 'expanded))
-          ((canvas-mindmap--children-folded-p node)
-           (canvas-mindmap--fold-below node 'expanded)
-           (canvas-mindmap--fold node 'expanded))
-          (t (canvas-mindmap--fold node 'collapsed)))))
-
-(defun canvas-mindmap--fold-to-level (node levels)
-  "Fold NODE's subtree so that LEVELS levels show, NODE's own being the first."
-  (cl-labels ((fold (n depth)
-                (canvas-mindmap--set-fold n (if (>= depth (1- levels)) 'collapsed 'expanded))
-                (dolist (child (canvas-mindmap-node-children n))
-                  (fold child (1+ depth)))))
-    (fold node 0)))
-
-(defun canvas-mindmap-show-level (levels)
-  "Show LEVELS levels of the keyboard's node, its own being the first,
-as a digit does for a magit section."
-  (interactive "p")
-  (canvas-mindmap--fold-to-level (canvas-diagram-selected) levels)
-  (canvas-diagram-set-selected
-   (canvas-mindmap--shown-node (canvas-mindmap--root) (canvas-diagram-selected)))
-  (canvas-diagram-relayout))
-
-(defun canvas-mindmap-show-all-level (levels)
-  "Show LEVELS levels of the whole map, the root's being the first,
-as a meta digit does for a magit buffer.  Folds made by hand are let go."
-  (interactive "p")
-  (setq canvas-mindmap--folds nil
-        canvas-mindmap-depth (1- levels))
-  (canvas-diagram-rebuild))
-
-(defmacro canvas-mindmap--define-level-commands ()
-  "Define the commands digits 1 to 4 and their meta forms run."
-  `(progn
-     ,@(cl-loop for n from 1 to 4
-                collect `(defun ,(intern (format "canvas-mindmap-show-level-%d" n)) ()
-                           ,(format "Show %d level%s of the keyboard's node." n (if (= n 1) "" "s"))
-                           (interactive)
-                           (canvas-mindmap-show-level ,n))
-                collect `(defun ,(intern (format "canvas-mindmap-show-all-level-%d" n)) ()
-                           ,(format "Show %d level%s of the whole map." n (if (= n 1) "" "s"))
-                           (interactive)
-                           (canvas-mindmap-show-all-level ,n)))))
-
-(canvas-mindmap--define-level-commands)
-
-(defun canvas-mindmap--levels ()
-  "How many levels the map has in all."
-  (canvas-mindmap--spec-depth (canvas-diagram-spec canvas-diagram--diagram)))
-
-(defun canvas-mindmap-cycle-global ()
-  "Cycle the whole map through its levels, as magit cycles all sections:
-one level, two, and so on, then all of them, then one again."
-  (interactive)
-  (let ((levels (canvas-mindmap--levels)))
-    (setq canvas-mindmap-depth
-          (cond ((null canvas-mindmap-depth) 1)
-                ((>= (1+ canvas-mindmap-depth) levels) nil)
-                (t (1+ canvas-mindmap-depth))))
-    (canvas-diagram-rebuild)))
-
-(defun canvas-mindmap-shallower ()
-  "Show one level fewer, down to the branches."
-  (interactive)
-  (setq canvas-mindmap-depth (max 1 (1- (or canvas-mindmap-depth (canvas-mindmap--levels)))))
-  (canvas-diagram-rebuild))
-
-(defun canvas-mindmap-deeper ()
-  "Show one level more, up to all of them."
-  (interactive)
-  (when canvas-mindmap-depth
-    (let ((depth (1+ canvas-mindmap-depth)))
-      (setq canvas-mindmap-depth (and (< depth (canvas-mindmap--levels)) depth)))
-    (canvas-diagram-rebuild)))
+(defun canvas-mindmap--double-click (_diagram node)
+  "Put the keyboard on NODE, the box a double click hit, and fold or unfold it."
+  (canvas-diagram-set-selected node)
+  (canvas-diagram-toggle-fold))
 
 ;;;; Filtering by kind and by status
 
@@ -1402,15 +1325,16 @@ showing them all.  None for a map without statuses."
 ;;;; The diagram: how the tree plugs into canvas-diagram
 
 (defun canvas-mindmap--build (_diagram spec)
-  "The tree SPEC describes, less the kinds and the statuses hidden, folded
-at the level limit and by hand."
-  (canvas-mindmap--apply-folds
-   (canvas-mindmap--filter (canvas-mindmap--tree-of spec)
-                           canvas-mindmap--hidden-kinds canvas-mindmap--hidden-statuses)))
+  "The tree SPEC describes, less the kinds and the statuses hidden.
+The layout folds it."
+  (canvas-mindmap--filter (canvas-mindmap--tree-of spec)
+                          canvas-mindmap--hidden-kinds canvas-mindmap--hidden-statuses))
 
 (defun canvas-mindmap--lay-out (diagram ctx)
-  "Lay DIAGRAM's tree out on CTX; the nodes shown, in reading order."
+  "Fold DIAGRAM's tree as the fold rule says, and lay it out on CTX.
+Return the nodes shown, in reading order."
   (let ((root (canvas-diagram-model diagram)))
+    (canvas-mindmap--fold-by-rule root (canvas-mindmap--key root root))
     (canvas-mindmap--layout root (canvas-diagram-measure ctx)
                             (canvas-mindmap--gap-x) (canvas-mindmap--gap-y)
                             canvas-mindmap-direction)
@@ -1423,7 +1347,7 @@ Going into a folded node unfolds it first."
     (pcase direction
       ('in (when-let* ((children (canvas-mindmap-node-children node)))
              (when (canvas-mindmap-node-collapsed node)
-               (canvas-mindmap--fold node 'expanded))
+               (canvas-mindmap--unfold diagram node))
              (canvas-mindmap--nearest children (canvas-diagram-middle-y node))))
       ('out (canvas-mindmap--parent root node))
       ('next (canvas-diagram-neighbour (canvas-mindmap--preorder root) node 1))
@@ -1450,10 +1374,10 @@ branches on.  As `beginning-of-defun' and `end-of-defun' move."
           (t branch))))
 
 (defun canvas-mindmap--restore (diagram key)
-  "The node at KEY, a label path, in DIAGRAM's rebuilt tree, or the
-nearest one shown."
+  "The node at KEY, as `canvas-mindmap--key' gives it, in DIAGRAM's
+rebuilt tree, or the nearest one shown."
   (let ((root (canvas-diagram-model diagram)))
-    (canvas-mindmap--shown-node root (canvas-mindmap--node-by-path root key))))
+    (canvas-mindmap--shown-node root (canvas-mindmap--node-by-key root key))))
 
 (defconst canvas-mindmap--callbacks
   (list :build #'canvas-mindmap--build
@@ -1473,9 +1397,11 @@ nearest one shown."
                 (canvas-mindmap--card-text (canvas-diagram-model diagram) node))
         :legend (lambda (diagram) (canvas-mindmap--legend-entries (canvas-diagram-model diagram)))
         :move #'canvas-mindmap--move
-        :node-key (lambda (diagram node) (canvas-mindmap--path (canvas-diagram-model diagram) node))
+        :node-key (lambda (diagram node) (canvas-mindmap--key (canvas-diagram-model diagram) node))
         :restore #'canvas-mindmap--restore
-        :double-click (lambda (_diagram node) (canvas-mindmap-toggle-collapse node))
+        :fold-trees #'canvas-mindmap--fold-trees
+        :fold-start #'canvas-mindmap--fold-start
+        :double-click #'canvas-mindmap--double-click
         :read-source #'canvas-mindmap--read-source
         :source-text #'canvas-mindmap--source-text
         :menu 'canvas-mindmap-menu)
@@ -1493,26 +1419,16 @@ nearest one shown."
   '(curve straight elbow) "Curve, straighten or bend the edges.")
 
 (defconst canvas-mindmap--setting-keys
-  '(("d" . canvas-mindmap-cycle-direction) ("e" . canvas-mindmap-cycle-edge-style)
-    ("[" . canvas-mindmap-shallower) ("]" . canvas-mindmap-deeper))
+  '(("d" . canvas-mindmap-cycle-direction) ("e" . canvas-mindmap-cycle-edge-style))
   "The mind map's own menu keys, bound in the map buffer too.")
 
 (defun canvas-mindmap--make-mode-map ()
-  "The keys a mind map has over any diagram: folding as in magit, the
-levels, and its own looks.  The diagram's keys are its parent from the
-start, not from the first buffer in the mode."
+  "The keys a mind map has over any diagram: c, which folds as TAB does,
+and its own looks.  The fold keys are the diagram's.  The diagram's keys
+are its parent from the start, not from the first buffer in the mode."
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map canvas-diagram-mode-map)
-    (define-key map (kbd "TAB") #'canvas-mindmap-toggle-collapse)
-    (define-key map (kbd "C-<tab>") #'canvas-mindmap-cycle-node)
-    (define-key map (kbd "<backtab>") #'canvas-mindmap-cycle-global)
-    (define-key map (kbd "c") #'canvas-mindmap-toggle-collapse)
-    ;; Digits show levels of the node, meta digits of the map, as in magit.
-    (dotimes (i 4)
-      (define-key map (kbd (format "%d" (1+ i)))
-                  (intern (format "canvas-mindmap-show-level-%d" (1+ i))))
-      (define-key map (kbd (format "M-%d" (1+ i)))
-                  (intern (format "canvas-mindmap-show-all-level-%d" (1+ i)))))
+    (define-key map (kbd "c") #'canvas-diagram-toggle-fold)
     (pcase-dolist (`(,key . ,command) canvas-mindmap--setting-keys)
       (define-key map (kbd key) command))
     map))
@@ -1531,10 +1447,11 @@ node by name.  \\[canvas-diagram-toggle-card] opens the node's card,
 \\[canvas-diagram-visit-source] goes to its line in the source,
 \\[canvas-diagram-copy-node] copies its label and note, and with a
 prefix argument its heading and body in the source.
-\\[canvas-mindmap-toggle-collapse] folds and unfolds as in magit,
-\\[canvas-mindmap-cycle-node] cycles a node and
-\\[canvas-mindmap-cycle-global] the whole map; the digits show levels
-of the node and the meta digits of the map.  \\[canvas-diagram-menu]
+The fold keys come from the diagram and work as in magit.  TAB folds a node or
+unfolds it, and c and a double click do the same.  C-TAB cycles the
+fold of a node, and S-TAB cycles the levels of the whole map.  The
+digits show levels of the node, and the meta digits show levels of the
+map.  Moving into a folded node unfolds it.  \\[canvas-diagram-menu]
 opens the menu of layouts, shapes and colours, whose keys work here
 directly as well.
 
@@ -1548,10 +1465,7 @@ the map's own keys and the mouse, so the effect can be tried at once."
    ("d" canvas-mindmap-cycle-direction :transient t
     :description (lambda () (canvas-diagram-setting "direction" 'canvas-mindmap-direction)))
    ("e" canvas-mindmap-cycle-edge-style :transient t
-    :description (lambda () (canvas-diagram-setting "edges" 'canvas-mindmap-edge-style)))
-   ("[" canvas-mindmap-shallower :transient t
-    :description (lambda () (canvas-diagram-setting "levels" 'canvas-mindmap-depth "all")))
-   ("]" canvas-mindmap-deeper :transient t :description "one level more")]
+    :description (lambda () (canvas-diagram-setting "edges" 'canvas-mindmap-edge-style)))]
   [:description "Kinds" :class transient-column :setup-children canvas-mindmap--kind-children]
   [:description "Statuses" :class transient-column :setup-children canvas-mindmap--status-children])
 
