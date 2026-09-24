@@ -120,11 +120,12 @@ branches, the buffer ends to the root and the last node, `goto-line`
 to a node by name; `RET` opens the card, `C-RET` visits the source,
 `SPC` opens the menu, `?` lists every key.
 
-`M-w` copies the node: its label, a blank line and its note. With a
-prefix argument, it copies the node's text in the org or markdown
-buffer: the heading line and the lines up to the next heading, or for a
-list item, its line and the lines indented below it. The menu's Copy
-group, `y`, and embark copy the header or the body alone.
+`M-w` copies the node: its label, a blank line and its note. `C-u M-w`
+copies the whole map as a picture, as in every canvas buffer. `y s` in
+the menu copies the node's text in the org or markdown buffer: the
+heading line and the lines up to the next heading, or for a list item,
+its line and the lines indented below it. The menu's Copy group, `y`,
+and embark copy the header or the body alone.
 
 Folding works as in magit. The fold keys come from canvas-diagram, and
 they work the same in every diagram that folds. `TAB` folds the
