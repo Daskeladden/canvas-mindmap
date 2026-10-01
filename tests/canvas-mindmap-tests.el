@@ -1477,4 +1477,11 @@ opened with DEPTH as `canvas-mindmap-depth'."
       (should (save-excursion (re-search-forward "TERMS AND CONDITIONS" nil t)))
       (should (save-excursion (re-search-forward "Version 3, 29 June 2007" nil t))))))
 
+(ert-deftest canvas-mindmap-is-the-layout-of-its-kind ()
+  ;; GIVEN canvas-mindmap loaded
+  ;; THEN readers draw a mind map, a spec of kind mindmap, with it: it follows
+  ;;      the source AND exports a picture
+  (should (equal (alist-get 'mindmap canvas-diagram-layouts)
+                 '(:follow canvas-mindmap-follow :export canvas-mindmap-export))))
+
 ;;; canvas-mindmap-tests.el ends here

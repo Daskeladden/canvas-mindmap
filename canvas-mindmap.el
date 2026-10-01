@@ -42,6 +42,7 @@
 (require 'cl-lib)
 (require 'imenu)
 (require 'canvas-diagram)
+(require 'canvas-diagram-reader)
 (require 'treesit nil t)
 
 (defgroup canvas-mindmap nil
@@ -1537,6 +1538,8 @@ buffer or frame is needed, so this works in batch; in a map buffer
       ("the minimap shows it all" :kind "question"))
      ("replaces a glyph" :kind "risk" :note "A canvas cannot composite over buffer text, so the map lives in its own window."
       ("so it lives in its own window")))))
+
+(canvas-diagram-define-layout 'mindmap :follow #'canvas-mindmap-follow :export #'canvas-mindmap-export)
 
 (provide 'canvas-mindmap)
 ;;; canvas-mindmap.el ends here
