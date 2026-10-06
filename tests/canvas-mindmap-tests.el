@@ -1317,7 +1317,7 @@ opened with DEPTH as `canvas-mindmap-depth'."
     (should (eq (lookup-key map (kbd "^")) #'canvas-diagram-move-out))
     (should (eq (lookup-key map (kbd "n")) #'canvas-diagram-move-next))
     (should (eq (lookup-key map (kbd "C-<return>")) #'canvas-diagram-visit-source))
-    (should (eq (lookup-key map [double-mouse-1]) #'canvas-diagram-double-click))
+    (should (eq (lookup-key map [double-down-mouse-1]) #'canvas-diagram-mouse))
     (should (eq (lookup-key map [canvas-diagram-node down-mouse-1]) #'canvas-diagram-mouse))))
 
 (ert-deftest canvas-mindmap-menu-has-the-layout-group-and-the-shared-ones ()
