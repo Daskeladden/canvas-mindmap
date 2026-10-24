@@ -97,16 +97,17 @@ A keyword not listed takes `canvas-mindmap-status-open-color', or
 
 (cl-defstruct (canvas-mindmap-node (:include canvas-diagram-node)
                                    (:constructor canvas-mindmap-node-create))
-  children branch collapsed (extent 0) status done)
+  children branch collapsed (extent 0) status done tags)
 
 (defun canvas-mindmap--options (rest)
   "Split REST, a spec after its label, into (PLIST . CHILDREN).
-Options are keyword-value pairs before the children: :kind, :status,
-the node's todo keyword, :done, whether org counts that keyword done,
-:note, :icon and :pos, where the node came from in its buffer."
+Options are keyword-value pairs before the children: :kind, :tags, the
+node's tags as a list of strings, :status, the node's todo keyword,
+:done, whether org counts that keyword done, :note, :icon and :pos,
+where the node came from in its buffer."
   (let (plist)
     (while (keywordp (car rest))
-      (unless (memq (car rest) '(:kind :status :done :note :icon :pos))
+      (unless (memq (car rest) '(:kind :tags :status :done :note :icon :pos))
         (error "canvas-mindmap: unknown option %S" (car rest)))
       (push (pop rest) plist)
       (push (pop rest) plist))
@@ -119,6 +120,13 @@ the node's todo keyword, :done, whether org counts that keyword done,
       (error "canvas-mindmap: status %S is not a string" status))
     status))
 
+(defun canvas-mindmap--tags-option (plist)
+  "The :tags of PLIST, a list of strings; any other value is an error."
+  (let ((tags (plist-get plist :tags)))
+    (unless (and (listp tags) (cl-every #'stringp tags))
+      (error "canvas-mindmap: tags %S are not a list of strings" tags))
+    tags))
+
 (defun canvas-mindmap--tree (spec)
   "Node tree from SPEC, a nested list (LABEL [OPTION VALUE]... CHILD...)."
   (unless (stringp (car spec))
@@ -127,6 +135,7 @@ the node's todo keyword, :done, whether org counts that keyword done,
     (canvas-mindmap-node-create
      :label (car spec)
      :kind (plist-get plist :kind)
+     :tags (canvas-mindmap--tags-option plist)
      :status (canvas-mindmap--status-option plist)
      :done (and (plist-get plist :done) t)
      :note (plist-get plist :note)
@@ -444,20 +453,20 @@ buffer's #+TODO lines, else `org-todo-keywords', else TODO and DONE."
 (defun canvas-mindmap--parse-title (title keywords)
   "Split TITLE into (LABEL . OPTIONS): a leading keyword of KEYWORDS,
 \((KEYWORD . DONE)...), is its :status, with :done when it is done; the
-first tag its :kind."
-  (let (kind status)
+first tag its :kind, and each tag in its :tags."
+  (let (tags status)
     (when (string-match canvas-mindmap--tags-re title)
       ;; Read the match before `split-string' runs a search of its own.
-      (let ((tags (match-string 1 title))
+      (let ((text (match-string 1 title))
             (cut (match-beginning 0)))
-        (setq kind (car (split-string tags ":" t))
+        (setq tags (split-string text ":" t)
               title (substring title 0 cut))))
     (when (and (string-match "^\\([[:upper:]][[:upper:][:digit:]_-]*\\)[ \t]+" title)
                (assoc (match-string 1 title) keywords))
       (setq status (assoc (match-string 1 title) keywords)
             title (substring title (match-end 0))))
     (cons (canvas-mindmap--clean-label title)
-          (append (and kind (list :kind kind))
+          (append (and tags (list :kind (car tags) :tags tags))
                   (and status (list :status (car status)))
                   (and (cdr status) (list :done t))))))
 
@@ -1147,7 +1156,7 @@ The fold rule of canvas-diagram says which nodes hide their children."
   (canvas-diagram-set-selected node)
   (canvas-diagram-toggle-fold))
 
-;;;; Filtering by kind and by status
+;;;; Filtering by kind, by status and by tag
 
 (defvar-local canvas-mindmap--hidden-kinds nil
   "The kinds of node this map leaves out, as strings.")
@@ -1155,27 +1164,33 @@ The fold rule of canvas-diagram says which nodes hide their children."
 (defvar-local canvas-mindmap--hidden-statuses nil
   "The statuses, todo keywords, of node this map leaves out, as strings.")
 
-(defun canvas-mindmap--hidden-p (node kinds statuses)
-  "Whether NODE itself is left out: its kind is one of KINDS, or its
-status one of STATUSES."
+(defvar-local canvas-mindmap--shown-tag nil
+  "The tag that each node of this map has, save the nodes on the way to
+such a node, or nil when the map has the nodes of each tag.")
+
+(defun canvas-mindmap--hidden-p (node kinds statuses tag)
+  "Whether NODE itself is left out: its kind is one of KINDS, its status
+one of STATUSES, or it does not have TAG when TAG is not nil."
   (let ((kind (canvas-mindmap-node-kind node))
         (status (canvas-mindmap-node-status node)))
     (or (and kind (member kind kinds) t)
-        (and status (member status statuses) t))))
+        (and status (member status statuses) t)
+        (and tag (not (member tag (canvas-mindmap-node-tags node)))))))
 
-(defun canvas-mindmap--keep-p (node kinds statuses)
-  "Whether NODE stays in a map without the KINDS and the STATUSES: it is
-not left out itself, or something below it stays.  Its subtree is
-filtered first."
-  (canvas-mindmap--filter node kinds statuses)
-  (or (not (canvas-mindmap--hidden-p node kinds statuses))
+(defun canvas-mindmap--keep-p (node kinds statuses tag)
+  "Whether NODE stays in a map without the KINDS and the STATUSES, and
+with the nodes of TAG only: it is not left out itself, or something
+below it stays.  Its subtree is filtered first."
+  (canvas-mindmap--filter node kinds statuses tag)
+  (or (not (canvas-mindmap--hidden-p node kinds statuses tag))
       (and (canvas-mindmap-node-children node) t)))
 
-(defun canvas-mindmap--filter (node kinds statuses)
-  "Take the nodes of the KINDS and the STATUSES out of NODE's tree, save
-those on the way to nodes kept.  Return NODE."
+(defun canvas-mindmap--filter (node kinds statuses tag)
+  "Take the nodes of the KINDS and the STATUSES, and the nodes without
+TAG when it is not nil, out of NODE's tree, save those on the way to
+nodes kept.  Return NODE."
   (setf (canvas-mindmap-node-children node)
-        (cl-remove-if-not (lambda (child) (canvas-mindmap--keep-p child kinds statuses))
+        (cl-remove-if-not (lambda (child) (canvas-mindmap--keep-p child kinds statuses tag))
                           (canvas-mindmap-node-children node)))
   node)
 
@@ -1242,9 +1257,20 @@ them back in."
 
 (defun canvas-mindmap-hide-statuses (statuses)
   "Leave the nodes of STATUSES, a list of todo keywords, out of the map,
-and take every other status back in."
-  (setq canvas-mindmap--hidden-statuses (copy-sequence statuses))
-  (canvas-diagram-rebuild))
+and take every other status back in.  The map is built again only when
+STATUSES are new to it."
+  (unless (equal statuses canvas-mindmap--hidden-statuses)
+    (setq canvas-mindmap--hidden-statuses (copy-sequence statuses))
+    (canvas-diagram-rebuild)))
+
+(defun canvas-mindmap-show-tag (tag)
+  "Leave out of the map each node that does not have TAG, save the nodes
+on the way to a node that has it.  With nil for TAG, take each node back
+in.  The map is built again only when TAG is new to it."
+  (cl-check-type tag (or null string))
+  (unless (equal tag canvas-mindmap--shown-tag)
+    (setq canvas-mindmap--shown-tag tag)
+    (canvas-diagram-rebuild)))
 
 (defun canvas-mindmap-show-all-statuses ()
   "Take every status back into the map."
@@ -1331,10 +1357,11 @@ showing them all.  None for a map without statuses."
 ;;;; The diagram: how the tree plugs into canvas-diagram
 
 (defun canvas-mindmap--build (_diagram spec)
-  "The tree SPEC describes, less the kinds and the statuses hidden.
-The layout folds it."
+  "The tree SPEC describes, less the kinds and the statuses hidden, and
+less the nodes without the tag shown.  The layout folds it."
   (canvas-mindmap--filter (canvas-mindmap--tree-of spec)
-                          canvas-mindmap--hidden-kinds canvas-mindmap--hidden-statuses))
+                          canvas-mindmap--hidden-kinds canvas-mindmap--hidden-statuses
+                          canvas-mindmap--shown-tag))
 
 (defun canvas-mindmap--lay-out (diagram ctx)
   "Fold DIAGRAM's tree as the fold rule says, and lay it out on CTX.

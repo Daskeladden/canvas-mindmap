@@ -67,7 +67,7 @@ quickest way to see whether the module built and the canvas is there.
 outline gives its headings, with plain list items under a heading as
 nodes too, nested by their indentation, and sub-headings after them.
 The first tag of a heading is its kind, and so is a list item's
-checkbox. A heading's todo keyword is its status. If org counts the
+checkbox. Each tag of a heading is in its tags. A heading's todo keyword is its status. If org counts the
 keyword as done, the status is done too. The keywords and their split into open and done come from org
 in an org buffer, else from the file's `#+TODO:` lines, else from
 `org-todo-keywords`, else they are TODO and DONE. The other text under a
@@ -103,7 +103,8 @@ emacs -Q --batch -L /path/to/canvas-diagram -L /path/to/canvas-mindmap \
   --eval '(canvas-mindmap-export (quote ("Root" ("A" :kind "todo") ("B" :note "why"))) "map.png")'
 ```
 
-A spec is a nested list: `(LABEL [:kind KIND] [:status KEYWORD [:done t]] [:note NOTE] [:icon ICON] CHILD...)`.
+A spec is a nested list: `(LABEL [:kind KIND] [:tags TAGS] [:status KEYWORD [:done t]] [:note NOTE] [:icon ICON] CHILD...)`.
+`:tags` is a list of strings.
 `:status` gives the node its badge, and `:done t` marks the keyword as
 done. If `canvas-mindmap-statuses` does not list the keyword, `:done`
 sets the colour of its badge.
@@ -153,7 +154,8 @@ keeps only the next kind in turn and `K K` shows every kind again. The
 Statuses group works the same way under `S`, with an entry for each
 todo keyword in the map: `S d` leaves out the DONE nodes, and `S S`
 shows every status again. A hidden node stays as the way to a shown one
-below it. The shared groups
+below it. A package can keep only the nodes of one tag with
+`canvas-mindmap-show-tag`, and the nodes on the way to them stay too. The shared groups
 follow, folds, zoom, boxes, spacing, font, palette, kinds, legend, icons and
 paper; the single keys work in the map directly as well.
 

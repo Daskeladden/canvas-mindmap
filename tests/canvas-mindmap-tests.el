@@ -203,12 +203,21 @@ opened with DEPTH as `canvas-mindmap-depth'."
   ;;       alone, and body text over two lines
   ;; WHEN they are read
   ;; THEN the keyword is the status, done when org counts it done, the tag
-  ;;      the kind beside it, AND the body, trimmed, is the note
+  ;;      the kind and the tags beside it, AND the body, trimmed, is the note
   (with-temp-buffer
     (insert "* TODO Ship it :risk:\nsome body\nmore\n\n** DONE Sub\n** Plain :idea:\n")
     (should (equal (canvas-mindmap--headings-tree)
-                   '("Ship it" :kind "risk" :status "TODO" :note "some body\nmore"
-                     ("Sub" :status "DONE" :done t) ("Plain" :kind "idea"))))))
+                   '("Ship it" :kind "risk" :tags ("risk") :status "TODO" :note "some body\nmore"
+                     ("Sub" :status "DONE" :done t) ("Plain" :kind "idea" :tags ("idea")))))))
+
+(ert-deftest canvas-mindmap-org-headings-keep-each-tag ()
+  ;; GIVEN an org heading with two tags
+  ;; WHEN it is read
+  ;; THEN its first tag is the kind, AND both tags are its tags
+  (with-temp-buffer
+    (insert "* Ship it :risk:next:\n")
+    (should (equal (canvas-mindmap--headings-tree)
+                   '("Ship it" :kind "risk" :tags ("risk" "next"))))))
 
 (defvar org-todo-keywords)
 
@@ -1293,6 +1302,44 @@ opened with DEPTH as `canvas-mindmap-depth'."
       (should (equal (funcall shown) '("R" "a")))
       (canvas-mindmap-hide-statuses nil)
       (should (equal (funcall shown) '("R" "a" "b"))))))
+
+(ert-deftest canvas-mindmap-show-tag-keeps-the-nodes-of-the-tag-and-the-way-to-them ()
+  ;; GIVEN a tree with a node of the tags next and risk below a node with
+  ;;       no tag, a node of the tag risk, AND a node with no tag over
+  ;;       another one
+  ;; WHEN the map is told to show the tag next, then risk, then no tag
+  ;; THEN it first has the node of next and the node on the way to it,
+  ;;      AND then the two nodes of risk and that way, AND then each node
+  (canvas-mindmap-test--in-map-buffer '("R" ("a" ("b" :tags ("next" "risk")))
+                                        ("c" :tags ("risk")) ("d" ("e")))
+      '(600 . 300)
+    (let ((shown (lambda () (mapcar #'canvas-mindmap-node-label (canvas-diagram-nodes-shown)))))
+      (canvas-mindmap-show-tag "next")
+      (should (equal (funcall shown) '("R" "a" "b")))
+      (canvas-mindmap-show-tag "risk")
+      (should (equal (funcall shown) '("R" "a" "b" "c")))
+      (canvas-mindmap-show-tag nil)
+      (should (equal (funcall shown) '("R" "a" "b" "c" "d" "e"))))))
+
+(ert-deftest canvas-mindmap-a-filter-the-map-has-builds-nothing ()
+  ;; GIVEN a map that shows the tag next and hides the status DONE
+  ;; WHEN it is told the same tag and the same statuses again
+  ;; THEN it is not built again
+  (canvas-mindmap-test--in-map-buffer '("R" ("a" :tags ("next")) ("b" :status "DONE" :done t))
+      '(600 . 300)
+    (canvas-mindmap-show-tag "next")
+    (canvas-mindmap-hide-statuses '("DONE"))
+    (let ((builds 0))
+      (cl-letf (((symbol-function 'canvas-diagram-rebuild) (lambda () (cl-incf builds))))
+        (canvas-mindmap-show-tag "next")
+        (canvas-mindmap-hide-statuses '("DONE")))
+      (should (= builds 0)))))
+
+(ert-deftest canvas-mindmap-tags-that-are-no-list-of-texts-are-an-error ()
+  ;; GIVEN a spec whose node has a text as its tags
+  ;; WHEN the tree is made of it
+  ;; THEN that is an error
+  (should-error (canvas-mindmap--tree '("R" ("a" :tags "next")))))
 
 (ert-deftest canvas-mindmap-the-menu-lists-the-statuses-live-and-toggles-them ()
   ;; GIVEN a map buffer of a tree with two statuses
