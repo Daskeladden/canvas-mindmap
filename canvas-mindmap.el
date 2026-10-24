@@ -1240,11 +1240,16 @@ them back in."
   (setq canvas-mindmap--hidden-kinds nil)
   (canvas-diagram-rebuild))
 
+(defun canvas-mindmap-hide-statuses (statuses)
+  "Leave the nodes of STATUSES, a list of todo keywords, out of the map,
+and take every other status back in."
+  (setq canvas-mindmap--hidden-statuses (copy-sequence statuses))
+  (canvas-diagram-rebuild))
+
 (defun canvas-mindmap-show-all-statuses ()
   "Take every status back into the map."
   (interactive)
-  (setq canvas-mindmap--hidden-statuses nil)
-  (canvas-diagram-rebuild))
+  (canvas-mindmap-hide-statuses nil))
 
 (defun canvas-mindmap--kinds ()
   "The kinds of this map, in order of first appearance."

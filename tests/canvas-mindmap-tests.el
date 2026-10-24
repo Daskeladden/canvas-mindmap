@@ -1280,6 +1280,20 @@ opened with DEPTH as `canvas-mindmap-depth'."
       (should-not canvas-mindmap--hidden-statuses)
       (should (equal (funcall shown) '("R" "a" "b" "c"))))))
 
+(ert-deftest canvas-mindmap-hide-statuses-shows-each-other-status-again ()
+  ;; GIVEN a tree with a DONE node and a TODO node, with DONE hidden
+  ;; WHEN the map is told to hide TODO only, and then no status
+  ;; THEN the map first has the DONE node and not the TODO node, AND then
+  ;;      it has both
+  (canvas-mindmap-test--in-map-buffer '("R" ("a" :status "DONE" :done t) ("b" :status "TODO"))
+      '(600 . 300)
+    (let ((shown (lambda () (mapcar #'canvas-mindmap-node-label (canvas-diagram-nodes-shown)))))
+      (canvas-mindmap-toggle-status "DONE")
+      (canvas-mindmap-hide-statuses '("TODO"))
+      (should (equal (funcall shown) '("R" "a")))
+      (canvas-mindmap-hide-statuses nil)
+      (should (equal (funcall shown) '("R" "a" "b"))))))
+
 (ert-deftest canvas-mindmap-the-menu-lists-the-statuses-live-and-toggles-them ()
   ;; GIVEN a map buffer of a tree with two statuses
   ;; WHEN the status suffixes are made and one is run
