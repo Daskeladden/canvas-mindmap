@@ -121,6 +121,13 @@ branches, the buffer ends to the root and the last node, `goto-line`
 to a node by name; `RET` opens the card, `C-RET` visits the source,
 `SPC` opens the menu, `?` lists every key.
 
+`M-x imenu` and `consult-imenu` list each node in reading order with
+its path, such as `Plans › Build › Tests`. The list has the folded
+nodes too, and it leaves out the nodes that a filter hides. Choosing an
+entry opens the folds above the node and moves the ring to it.
+Consult shows no preview here, because a node has no position in the
+buffer.
+
 `M-w` copies the node: its label, a blank line and its note. `C-u M-w`
 copies the whole map as a picture, as in every canvas buffer. `y s` in
 the menu copies the node's text in the org or markdown buffer: the

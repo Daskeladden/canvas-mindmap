@@ -948,6 +948,30 @@ opened with DEPTH as `canvas-mindmap-depth'."
                (should (= (with-current-buffer org (point)) 13)))
            (canvas-diagram--release)))))))
 
+;;;; The nodes in imenu
+
+(ert-deftest canvas-mindmap-node-index-says-a-repeated-label-by-its-number ()
+  ;; GIVEN a parent that repeats a label, with a child below the repeat
+  ;; WHEN the map makes its imenu index
+  ;; THEN the root stands by its name, and each other entry is unique
+  (canvas-mindmap-test--in-map-buffer '("Root" ("A") ("A" ("B"))) '(400 . 300)
+    (should (equal (mapcar #'car (canvas-diagram--node-index))
+                   '("Root" "A" "A (2)" "A (2) › B")))))
+
+(ert-deftest canvas-mindmap-node-index-goes-to-a-node-below-two-folds ()
+  ;; GIVEN a map whose two levels above a node are folded
+  ;; WHEN the entry of the node is chosen
+  ;; THEN both folds open and the keyboard is on the node
+  (canvas-mindmap-test--in-map-buffer '("Root" ("A" ("B" ("C")))) '(400 . 300)
+    (canvas-diagram-set-selected (canvas-mindmap-test--labelled "B"))
+    (canvas-diagram-toggle-fold)
+    (canvas-diagram-set-selected (canvas-mindmap-test--labelled "A"))
+    (canvas-diagram-toggle-fold)
+    (should-not (member "C" (mapcar #'canvas-diagram-node-label (canvas-diagram-nodes-shown))))
+    (imenu (assoc "A › B › C" (canvas-diagram--node-index)))
+    (should (equal (canvas-mindmap-test--selected) "C"))
+    (should (member "C" (mapcar #'canvas-diagram-node-label (canvas-diagram-nodes-shown))))))
+
 ;;;; Copying a node
 
 (defconst canvas-mindmap-test--outline

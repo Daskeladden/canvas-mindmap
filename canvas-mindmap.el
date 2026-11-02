@@ -1096,7 +1096,7 @@ are several; the kinds are the diagram's business."
 (defun canvas-mindmap--card-text (root node)
   "The card's (TITLE PATH BODY) for NODE: its label, where it hangs, its note."
   (list (canvas-mindmap-node-label node)
-        (mapconcat #'identity (butlast (canvas-mindmap--path root node)) " › ")
+        (mapconcat #'identity (butlast (canvas-mindmap--path root node)) canvas-diagram-path-separator)
         (or (canvas-mindmap-node-note node)
             (pcase (length (canvas-mindmap-node-children node))
               (0 "A leaf, without a note.")
@@ -1354,6 +1354,21 @@ showing them all.  None for a map without statuses."
   "The menu's Statuses group, made when the menu opens, of this map's statuses."
   (transient-parse-suffixes 'canvas-mindmap-menu (canvas-mindmap--status-suffixes)))
 
+;;;; The nodes in imenu
+
+(defun canvas-mindmap--segment-name (segment)
+  "What the key SEGMENT says: a label, with its number when it repeats."
+  (pcase segment
+    ((pred stringp) segment)
+    (`(,label . ,n) (format "%s (%d)" label n))))
+
+(defun canvas-mindmap--key-name (key)
+  "The name of the node at KEY in imenu: the path below the root, and the
+root's own name for the root.  The number of a repeated label makes the
+name unique, because imenu finds the entry by its name."
+  (mapconcat #'canvas-mindmap--segment-name (or (cdr key) key)
+             canvas-diagram-path-separator))
+
 ;;;; The diagram: how the tree plugs into canvas-diagram
 
 (defun canvas-mindmap--build (_diagram spec)
@@ -1425,7 +1440,7 @@ rebuilt tree, or the nearest one shown."
         :badge (lambda (_diagram node) (canvas-mindmap--badge node))
         :header (lambda (diagram node)
                   (mapconcat #'identity (canvas-mindmap--path (canvas-diagram-model diagram) node)
-                             " › "))
+                             canvas-diagram-path-separator))
         :card (lambda (diagram node)
                 (canvas-mindmap--card-text (canvas-diagram-model diagram) node))
         :legend (lambda (diagram) (canvas-mindmap--legend-entries (canvas-diagram-model diagram)))
@@ -1434,6 +1449,7 @@ rebuilt tree, or the nearest one shown."
         :restore #'canvas-mindmap--restore
         :fold-trees #'canvas-mindmap--fold-trees
         :fold-start #'canvas-mindmap--fold-start
+        :index-name (lambda (_diagram key) (canvas-mindmap--key-name key))
         :double-click #'canvas-mindmap--double-click
         :read-source #'canvas-mindmap--read-source
         :source-text #'canvas-mindmap--source-text
@@ -1486,7 +1502,8 @@ fold of a node, and S-TAB cycles the levels of the whole map.  The
 digits show levels of the node, and the meta digits show levels of the
 map.  Moving into a folded node unfolds it.  \\[canvas-diagram-menu]
 opens the menu of layouts, shapes and colours, whose keys work here
-directly as well.
+directly as well.  The command `imenu' and consult's `consult-imenu' list
+each node with its path, also a folded one, and go to the node chosen.
 
 \\{canvas-mindmap-mode-map}")
 
