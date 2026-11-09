@@ -7,8 +7,10 @@ CONSULT ?= $(HOME)/.emacs.d/elpaca/builds/consult
 
 .PHONY: test acceptance module clean
 
+# Emacs can leave .elc files here when it loads the package.  A compiled
+# file that is older than its source is not loaded.
 test: module
-	$(EMACS) -Q --batch -L . -L $(DIAGRAM) -L $(KEYS) -L tests \
+	$(EMACS) -Q --batch --eval '(setq load-prefer-newer t)' -L . -L $(DIAGRAM) -L $(KEYS) -L tests \
 	  -l tests/canvas-mindmap-tests.el \
 	  --eval '(ert-run-tests-batch-and-exit)'
 
