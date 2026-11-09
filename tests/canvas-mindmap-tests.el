@@ -96,6 +96,13 @@ opened with DEPTH as `canvas-mindmap-depth'."
   (cons (+ 10 (floor (canvas-mindmap-node-x node)) 3)
         (+ 10 (floor (canvas-mindmap-node-y node)) 3)))
 
+(defun canvas-mindmap-test--double-click-at (xy)
+  "A double click of the left button at the canvas pixel XY in the
+selected window, with XY where Emacs puts it in the position of a click.
+A test cannot stub `posn-object-x-y' instead: it is a defsubst, so
+compiled code holds its body."
+  (list 'double-mouse-1 (list (selected-window) 1 xy 0 nil 1 '(0 . 0) nil xy '(0 . 0))))
+
 (defun canvas-mindmap-test--png-p (file)
   "Whether FILE starts with the PNG signature."
   (with-temp-buffer
@@ -1189,12 +1196,11 @@ opened with DEPTH as `canvas-mindmap-depth'."
   ;;      unfolds it
   (canvas-mindmap-test--in-map-buffer '("R" ("A" ("A1")) ("B")) '(600 . 300)
     (let ((a (canvas-mindmap-test--labelled "A")))
-      (cl-letf (((symbol-function 'posn-object-x-y) (lambda (_) (canvas-mindmap-test--inside a))))
-        (canvas-diagram-double-click '(double-mouse-1 (nil)))
-        (should (canvas-mindmap-node-collapsed a))
-        (should (equal (canvas-mindmap-test--selected) "A"))
-        (canvas-diagram-double-click '(double-mouse-1 (nil)))
-        (should-not (canvas-mindmap-node-collapsed a))))))
+      (canvas-diagram-double-click (canvas-mindmap-test--double-click-at (canvas-mindmap-test--inside a)))
+      (should (canvas-mindmap-node-collapsed a))
+      (should (equal (canvas-mindmap-test--selected) "A"))
+      (canvas-diagram-double-click (canvas-mindmap-test--double-click-at (canvas-mindmap-test--inside a)))
+      (should-not (canvas-mindmap-node-collapsed a)))))
 
 ;;;; Filtering by kind
 
