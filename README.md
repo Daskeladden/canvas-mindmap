@@ -54,8 +54,9 @@ Then put both on the load path:
 ```elisp
 (use-package canvas-mindmap
   :load-path ("/path/to/canvas-diagram" "/path/to/canvas-mindmap")
-  :commands (canvas-mindmap-show canvas-mindmap-show-file
-             canvas-mindmap-export canvas-mindmap-demo))
+  :commands (canvas-mindmap-show canvas-mindmap-show-subtree
+             canvas-mindmap-show-file canvas-mindmap-export
+             canvas-mindmap-demo))
 ```
 
 ## Use
@@ -88,6 +89,19 @@ which tree-sitter modes and eglot fill with classes and their methods,
 the categories and imenu's kind property serving as kinds. A language
 package can know more than either; see [Plugging in a
 language](#plugging-in-a-language).
+
+`M-x canvas-mindmap-show-subtree` draws only the heading of the
+section at point, with its subtree. With embark loaded, `m` on an org
+heading does the same, and `M` draws the whole buffer. When the
+package loads, it binds these keys. To have them before the first
+load, add `canvas-mindmap-show-subtree` to the `:commands` above, and
+add these lines to your init file:
+
+```elisp
+(with-eval-after-load 'embark-org
+  (keymap-set embark-org-heading-map "m" #'canvas-mindmap-show-subtree)
+  (keymap-set embark-org-heading-map "M" #'canvas-mindmap-show))
+```
 
 A map of a buffer follows it: once typing there pauses, the map is
 read again and redrawn, the keyboard staying on its node. Going to a

@@ -41,6 +41,7 @@
 
 (require 'cl-lib)
 (require 'imenu)
+(require 'outline)
 (require 'canvas-diagram)
 (require 'canvas-diagram-reader)
 (require 'treesit nil t)
@@ -1456,9 +1457,9 @@ rebuilt tree, or the nearest one shown."
         :menu 'canvas-mindmap-menu)
   "How the tree plugs into canvas-diagram.")
 
-(defun canvas-mindmap--diagram ()
-  "A fresh diagram of a mind map."
-  (canvas-diagram-create :callbacks canvas-mindmap--callbacks))
+(defun canvas-mindmap--diagram (&rest callbacks)
+  "A fresh diagram of a mind map, CALLBACKS, a plist, in place of its own."
+  (canvas-diagram-create :callbacks (append callbacks canvas-mindmap--callbacks)))
 
 ;;;; The mode and its keys
 
@@ -1540,8 +1541,16 @@ a buffer follows it: the map is drawn again once typing there pauses."
   "A fresh diagram of a mind map that READ, a package's reader, finds in
 the buffer it follows.  The outline's source text is not the package's,
 so it has none."
-  (canvas-diagram-create :callbacks (append (list :read-source read :source-text nil)
-                                            canvas-mindmap--callbacks)))
+  (canvas-mindmap--diagram :read-source read :source-text nil))
+
+(defun canvas-mindmap--show-following (buffer diagram name)
+  "Show in the buffer NAME the tree that DIAGRAM's reader finds in BUFFER,
+and follow BUFFER.  Return the map's buffer."
+  (let ((read (plist-get (canvas-diagram-callbacks diagram) :read-source)))
+    (canvas-diagram-show name #'canvas-mindmap-mode diagram
+                         (or (funcall read buffer)
+                             (user-error "canvas-mindmap: no tree to draw in %s" (buffer-name buffer)))
+                         buffer)))
 
 (defun canvas-mindmap-follow (buffer read &optional name)
   "Show the tree READ finds in BUFFER as a mind map, in the buffer NAME or
@@ -1549,11 +1558,38 @@ so it has none."
 reads it again and a changed tree is drawn.  READ is a function of a
 buffer giving a nested spec, or nil when it finds none, the last map
 then staying.  Return the buffer."
-  (canvas-diagram-show (or name "*canvas-mindmap*") #'canvas-mindmap-mode
-                       (canvas-mindmap--follow-diagram read)
-                       (or (funcall read buffer)
-                           (user-error "canvas-mindmap: no tree to draw in %s" (buffer-name buffer)))
-                       buffer))
+  (canvas-mindmap--show-following buffer (canvas-mindmap--follow-diagram read)
+                                  (or name "*canvas-mindmap*")))
+
+(defun canvas-mindmap--heading-marker ()
+  "A marker at the heading of the section that point is in.
+A user error before the first heading."
+  (save-excursion
+    (unless (ignore-errors (outline-back-to-heading t) t)
+      (user-error "canvas-mindmap: no heading at or above point"))
+    (point-marker)))
+
+(defun canvas-mindmap--subtree-reader (heading)
+  "A reader of the subtree whose heading starts at the marker HEADING: a
+function of the buffer giving the outline of the subtree with positions."
+  (lambda (buffer)
+    (with-current-buffer buffer
+      (save-excursion
+        (save-restriction
+          (widen)
+          (goto-char heading)
+          (narrow-to-region heading (progn (outline-end-of-subtree) (point)))
+          (canvas-mindmap--read-source buffer))))))
+
+;;;###autoload
+(defun canvas-mindmap-show-subtree ()
+  "Show the heading of the section at point and its subtree as a mind map.
+The map follows the buffer, as the map of the whole outline does."
+  (interactive)
+  (canvas-mindmap--show-following
+   (current-buffer)
+   (canvas-mindmap--diagram :read-source (canvas-mindmap--subtree-reader (canvas-mindmap--heading-marker)))
+   "*canvas-mindmap*"))
 
 ;;;###autoload
 (defun canvas-mindmap-show-file (file)
@@ -1569,6 +1605,15 @@ name, and return FILE.  SOURCE is a nested spec (LABEL [:kind KIND]
 buffer or frame is needed, so this works in batch; in a map buffer
 \\[canvas-diagram-write] writes the map shown."
   (canvas-diagram-export (canvas-mindmap--diagram) source file))
+
+;;;; Embark
+
+(defvar embark-org-heading-map)
+
+;;;###autoload
+(with-eval-after-load 'embark-org
+  (keymap-set embark-org-heading-map "m" #'canvas-mindmap-show-subtree)
+  (keymap-set embark-org-heading-map "M" #'canvas-mindmap-show))
 
 ;;;; Demo
 

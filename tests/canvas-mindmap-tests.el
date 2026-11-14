@@ -1502,6 +1502,76 @@ compiled code holds its body."
             (should-error (canvas-mindmap-follow source #'ignore) :type 'user-error))
         (kill-buffer source)))))
 
+;;;; The map of one subtree, and embark
+
+(defun canvas-mindmap-test--capture-show (shown)
+  "A stand-in for `canvas-diagram-show' that sets the symbol SHOWN to the
+name, the mode, the spec, the followed buffer and the callbacks it gets."
+  (lambda (name mode diagram spec &optional followed)
+    (set shown (list name mode spec followed (canvas-diagram-callbacks diagram)))))
+
+(ert-deftest canvas-mindmap-show-subtree-maps-the-heading-above-point-and-follows-it ()
+  ;; GIVEN an org buffer with three top-level headings, point in the body
+  ;;       of the second
+  ;; WHEN its subtree is shown as a mind map
+  ;; THEN the map holds that heading and its children alone, with the
+  ;;      lines they come from, in the mind map mode and following the
+  ;;      buffer, AND it copies from the source as the map of a whole
+  ;;      outline does, AND the buffer is left whole with point where it was
+  (let ((org (generate-new-buffer " canvas-mindmap-test-org"))
+        (shown (make-symbol "shown")))
+    (unwind-protect
+        (with-current-buffer org
+          (insert "* A\n** A1\n* B\nbody of B\n** B1\n* C\n")
+          (org-mode)
+          (goto-char 15)
+          (cl-letf (((symbol-function 'canvas-diagram-show) (canvas-mindmap-test--capture-show shown)))
+            (canvas-mindmap-show-subtree))
+          (pcase-let ((`(,name ,mode ,spec ,followed ,callbacks) (symbol-value shown)))
+            (should (equal name "*canvas-mindmap*"))
+            (should (eq mode #'canvas-mindmap-mode))
+            (should (equal spec '("B" :note "body of B" :pos 11 ("B1" :pos 25))))
+            (should (eq followed org))
+            (should (eq (plist-get callbacks :source-text) #'canvas-mindmap--source-text))
+            (should-not (buffer-narrowed-p))
+            (should (= (point) 15))
+            ;; WHEN a heading is added at the end of the subtree, and the map
+            ;;      reads the buffer again
+            ;; THEN the new heading is in the map, the next top-level heading
+            ;;      is not, AND the buffer is still whole
+            (goto-char 31)
+            (insert "** B2\n")
+            (should (equal (funcall (plist-get callbacks :read-source) org)
+                           '("B" :note "body of B" :pos 11 ("B1" :pos 25) ("B2" :pos 31))))
+            (should-not (buffer-narrowed-p))))
+      (kill-buffer org))))
+
+(ert-deftest canvas-mindmap-show-subtree-refuses-a-place-before-the-first-heading ()
+  ;; GIVEN an org buffer with point in the text before its first heading
+  ;; WHEN its subtree is shown as a mind map
+  ;; THEN the user is told that no heading is there, AND no map is shown
+  (with-temp-buffer
+    (insert "intro\n* A\n")
+    (org-mode)
+    (goto-char 1)
+    (let ((shown (make-symbol "shown")))
+      (set shown nil)
+      (cl-letf (((symbol-function 'canvas-diagram-show) (canvas-mindmap-test--capture-show shown)))
+        (should-error (canvas-mindmap-show-subtree) :type 'user-error))
+      (should-not (symbol-value shown)))))
+
+(defvar embark-org-heading-map)
+
+(ert-deftest canvas-mindmap-embark-maps-a-heading-or-its-whole-outline ()
+  ;; GIVEN canvas-mindmap loaded before embark's actions on org headings
+  ;; WHEN embark loads those actions
+  ;; THEN m on a heading maps its subtree, AND M maps the whole outline
+  (let ((embark-org-heading-map (make-sparse-keymap))
+        (features features))
+    (provide 'embark-org)
+    (should (eq (keymap-lookup embark-org-heading-map "m") #'canvas-mindmap-show-subtree))
+    (should (eq (keymap-lookup embark-org-heading-map "M") #'canvas-mindmap-show))))
+
 ;;;; The package
 
 (defun canvas-mindmap-test--library (name)
